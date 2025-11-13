@@ -7,7 +7,7 @@ Based on: [nmater1/smallville](https://github.com/nmater1/smallville) (Apache 2.
 - Local Ollama (Mistral) or OpenAI backend
 - Custom memory-driven prompts
 - Real-time `/state` sync with Godot
-- 60 FPS reactive NPC behavior
+- 30 FPS reactive NPC behavior
 
 ## Setup
 mvn clean package
