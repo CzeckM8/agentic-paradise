@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 public class SmallvilleClientMemoryStreamTest {
@@ -27,6 +28,7 @@ public class SmallvilleClientMemoryStreamTest {
     }
     
     @Test
+    @Disabled("Integration test - requires running Smallville server at localhost:8080")
     public void testMemoryStreamCreation() {
 	UUID uuid = client.createMemoryStream();
 	
@@ -34,6 +36,7 @@ public class SmallvilleClientMemoryStreamTest {
     }
     
     @Test
+    @Disabled("Integration test - requires running Smallville server at localhost:8080")
     public void testMemoryStreamCreateMemory() {
 	UUID uuid = client.createMemoryStream();
 	boolean success = client.addMemory(uuid, "memory 1");
@@ -41,6 +44,7 @@ public class SmallvilleClientMemoryStreamTest {
     }
     
     @Test
+    @Disabled("Integration test - requires running Smallville server at localhost:8080")
     public void testMemoryStreamFetchRelevantMemories() {
 	UUID uuid = client.createMemoryStream();
 	client.addMemory(uuid, "memory 1");

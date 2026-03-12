@@ -32,12 +32,14 @@ public class SmallvilleClientTest {
 
     @Test
     @Order(1)
+    @Disabled("Integration test - requires running Smallville server at localhost:8080")
     public void testLocationCreation() {
 	assertTrue(client.createLocation("Yellow House: Bedroom"));
     }
 
     @Test
     @Order(2)
+    @Disabled("Integration test - requires running Smallville server at localhost:8080")
     public void testAgentCreation() {
 	List<String> memories = List.of("Joe loves to play video games", "Joe lives in the yellow house");
 	boolean success = client.createAgent("Joe", memories, "Yellow House: Bedroom", "sleeping");
@@ -57,6 +59,7 @@ public class SmallvilleClientTest {
 
     @Test
     @Order(4)
+    @Disabled("Integration test - requires running Smallville server at localhost:8080")
     public void testReactToObservation() {
 	assertTrue(client.addObservation("Joe", "The yellow house is on fire", true));
     }
