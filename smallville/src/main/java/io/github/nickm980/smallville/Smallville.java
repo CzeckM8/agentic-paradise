@@ -2,7 +2,6 @@ package io.github.nickm980.smallville;
 
 import java.io.IOException;
 
-import org.apache.log4j.PropertyConfigurator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -24,7 +23,7 @@ public class Smallville {
     private static final Logger LOG = LoggerFactory.getLogger(Smallville.class);
 
     public static void main(String[] args) throws IOException {
-	configureLogs();
+	// slf4j-simple is now used for logging - no configuration needed
 
 	CommandLineArgs options = loadArgs(args);
 
@@ -57,12 +56,6 @@ public class Smallville {
     private static void loadConfig() {
 	SmallvilleConfig.getConfig();
 	SmallvilleConfig.getPrompts();
-    }
-
-    private static void configureLogs() {
-	String runId = String.valueOf(System.currentTimeMillis());
-	System.setProperty("runId", runId);
-	PropertyConfigurator.configure(Smallville.class.getClassLoader().getResource("log4j.properties"));
     }
 
     private static void startServer(int port) {
