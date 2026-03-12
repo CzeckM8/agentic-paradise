@@ -131,7 +131,7 @@
 		<dependency>
 			<groupId>org.json</groupId>
 			<artifactId>json</artifactId>
-			<version>20210307</version>
+			<version>20240303</version>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
@@ -175,13 +175,13 @@
 		<dependency>
 			<groupId>edu.stanford.nlp</groupId>
 			<artifactId>stanford-corenlp</artifactId>
-			<version>4.2.2</version>
+			<version>4.5.7</version>
 		</dependency>
 
 		<dependency>
 			<groupId>edu.stanford.nlp</groupId>
 			<artifactId>stanford-corenlp</artifactId>
-			<version>4.2.2</version>
+			<version>4.5.7</version>
 			<classifier>models</classifier>
 		</dependency>
 		<dependency>
