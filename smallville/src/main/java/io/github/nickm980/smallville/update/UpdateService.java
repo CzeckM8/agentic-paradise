@@ -94,6 +94,10 @@ public class UpdateService {
 	return chatService.ask(agent, question);
     }
 
+	public void updateCurrentActivity(Agent agent) {
+	chatService.updateCurrentActivity(agent);
+	}
+
     public String createTraitsWithCharacteristics(Agent agent) {
 	return chatService.createTraits(agent);
     }

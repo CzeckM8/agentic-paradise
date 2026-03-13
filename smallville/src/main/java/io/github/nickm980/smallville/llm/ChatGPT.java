@@ -131,7 +131,7 @@ public class ChatGPT implements LLM {
 
 	json = json.replace("%messages", MAPPER.writeValueAsString(prompt.build()));
 	json = json.replace("%temperature", String.valueOf(temperature));
-	json = json.replace("%model", "gemma3:4b");
+	json = json.replace("%model", "llama3.1:8b-instruct-q4_K_M");
 
 	LOG.debug("[Chat Request Original]" + json);
 	LOG.debug("[Chat Request]" + prompt.getContent());

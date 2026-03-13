@@ -53,6 +53,13 @@ public interface Prompts {
     CurrentActivity getCurrentActivity(Agent agent);
 
     /**
+     * Updates the agent's current activity and target location based on their plans.
+     * 
+     * @param agent The agent to update.
+     */
+    void updateCurrentActivity(Agent agent);
+
+    /**
      * Retrieves the short-term plans of an agent.
      * 
      * @param agent The agent for which to retrieve the short-term plans.

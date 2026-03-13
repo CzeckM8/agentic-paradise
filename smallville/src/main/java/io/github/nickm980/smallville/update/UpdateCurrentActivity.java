@@ -18,8 +18,19 @@ public class UpdateCurrentActivity extends AgentUpdate {
 	agent.setCurrentActivity(activity.getActivity());
 	agent.setCurrentEmoji(activity.getEmoji());
 
-	agent.setLocation(world.getLocation(activity.getLocation()).orElseThrow());
-	agent.getMemoryStream().add(new Observation(activity.getLastActivity()));
+	String desiredLocation = activity.getLocation();
+	if (desiredLocation != null && !desiredLocation.isBlank()) {
+	    world.getLocation(desiredLocation).ifPresentOrElse(loc -> {
+		agent.setTargetLocation(loc.getFullPath());
+		if (agent.getLocation() != null && agent.getLocation().getFullPath().equals(loc.getFullPath())) {
+		    agent.setTargetLocation(null);
+		}
+	    }, () -> LOG.warn("[Activity] Ignoring unknown destination location: {}", desiredLocation));
+	}
+
+	if (activity.getLastActivity() != null && !activity.getLastActivity().isBlank()) {
+	    agent.getMemoryStream().add(new Observation(activity.getLastActivity()));
+	}
 
 	return next(service, world, agent, info);
     }

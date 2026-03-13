@@ -10,6 +10,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -35,6 +38,7 @@ public final class SimulationController {
     private Analytics analytics;
     private SimulationService service;
     private Gson gson = new Gson();
+    private final Logger LOG = LoggerFactory.getLogger(SimulationController.class);
 
     public SimulationController(Analytics analytics, SimulationService service, MustacheFactory mf) {
 	this.mf = mf;
@@ -98,6 +102,32 @@ public final class SimulationController {
 	ctx.json(res);
     }
 
+	@Get("/agents/{name}/memories/summary")
+	public void getAgentMemorySummary(Context ctx, @Param String name) {
+	ctx.json(service.getAgentMemorySummary(name));
+	}
+
+	@Get("/agents/{name}/memories/recent")
+	public void getAgentMemoryRecent(Context ctx, @Param String name) {
+	int limit = parseLimit(ctx, 20);
+	ctx.json(Map.of("memories", service.getAgentMemoriesRecent(name, limit)));
+	}
+
+	@Get("/agents/{name}/memories/{index}")
+	public void getAgentMemoryByIndex(Context ctx, @Param String name, @Param int index) {
+	ctx.json(service.getAgentMemoryByIndex(name, index));
+	}
+
+	@Get("/agents/{name}/schedule")
+	public void getAgentSchedule(Context ctx, @Param String name) {
+	List<ScheduleResponse> schedule = service.getAgentSchedule(name);
+	Map<String, Object> byType = new HashMap<>();
+	byType.put("shortTerm", schedule.stream().filter(item -> "SHORT_TERM".equals(item.getType())).toList());
+	byType.put("midTerm", schedule.stream().filter(item -> "MID_TERM".equals(item.getType())).toList());
+	byType.put("longTerm", schedule.stream().filter(item -> "LONG_TERM".equals(item.getType())).toList());
+	ctx.json(Map.of("agentName", name, "items", schedule, "byType", byType));
+	}
+
     @Post("/agents/{name}/ask")
     public void askAgentQuestion(Context ctx) {
 	AskQuestionRequest request = ctx
@@ -112,27 +142,97 @@ public final class SimulationController {
 
     @Post("/agents")
     public void createAgent(Context ctx) {
-	CreateAgentRequest request = ctx
-	    .bodyValidator(CreateAgentRequest.class)
-	    .check((req) -> exists(req.getName()), "{name} cannot be missing")
-	    .check((req) -> exists(req.getActivity()), "{activity} cannot be missing")
-	    .check((req) -> exists(req.getLocation()), "{location} cannot be missing")
-	    .check((req) -> req.getMemories() != null && !req.getMemories().isEmpty(), "{memories} cannot be missing")
-	    .get();
+	LOG.info("[SERVER] POST /agents called");
+	String raw = ctx.body();
+	LOG.info("[SERVER] raw POST /agents body: {}", raw);
+	try {
+	    CreateAgentRequest request = ctx
+		.bodyValidator(CreateAgentRequest.class)
+		.check((req) -> exists(req.getName()), "{name} cannot be missing")
+		.check((req) -> exists(req.getActivity()), "{activity} cannot be missing")
+		.check((req) -> exists(req.getLocation()), "{location} cannot be missing")
+		.check((req) -> req.getMemories() != null && !req.getMemories().isEmpty(), "{memories} cannot be missing")
+		.get();
 
-	service.createAgent(request);
-	ctx.json(Map.of("success", true));
+	    LOG.info("[SERVER] Parsed agent request: name={}, loc={}, memoriesCount={}",
+		request.getName(), request.getLocation(),
+		request.getMemories() == null ? 0 : request.getMemories().size());
+	    service.createAgent(request);
+	    LOG.info("[SERVER] Agent created successfully: {}", request.getName());
+	    ctx.json(Map.of("success", true));
+	} catch (Exception e) {
+	    LOG.error("[SERVER] Error creating agent: {}", e.getMessage(), e);
+	    throw e;
+	}
     }
 
     @Post("/locations")
     public void createLocation(Context ctx) {
-	CreateLocationRequest request = ctx
-	    .bodyValidator(CreateLocationRequest.class)
-	    .check((req) -> exists(req.getName()), "{name} cannot be missing")
-	    .get();
+	LOG.info("[SERVER] POST /locations called");
+	String raw = ctx.body();
+	LOG.info("[SERVER] raw POST /locations body: {}", raw);
+	try {
+	    CreateLocationRequest request = ctx
+		.bodyValidator(CreateLocationRequest.class)
+		.check((req) -> exists(req.getName()), "{name} cannot be missing")
+		.get();
+	    
+	    LOG.info("[SERVER] Creating location: {} (type: {})", request.getName(), request.getType());
+	    service.createLocation(request);
+	    ctx.json(Map.of("success", true));
+	} catch (Exception e) {
+	    LOG.error("[SERVER] Error creating location", e);
+	    throw e;
+	}
+    }
 
-	service.createLocation(request);
-	ctx.json(Map.of("success", true));
+    @Post("/player")
+    public void createPlayer(Context ctx) {
+	LOG.info("[SERVER] POST /player called");
+	try {
+	    CreatePlayerRequest request = ctx
+		.bodyValidator(CreatePlayerRequest.class)
+		.check((req) -> exists(req.getName()), "{name} cannot be missing")
+		.check((req) -> exists(req.getLocation()), "{location} cannot be missing")
+		.get();
+
+	    LOG.info("[SERVER] Creating player: {} at location: {}", request.getName(), request.getLocation());
+	    service.createPlayer(request);
+	    LOG.info("[SERVER] Player created successfully: {}", request.getName());
+	    ctx.json(Map.of("success", true));
+	} catch (Exception e) {
+	    LOG.error("[SERVER] Error creating player: {}", e.getMessage(), e);
+	    throw e;
+	}
+    }
+
+    @Get("/player/{name}")
+    public void getPlayer(Context ctx, @Param String name) {
+	PlayerStateResponse res = service.getPlayerState(name);
+	ctx.json(res);
+    }
+
+    @Post("/player/actions")
+    public void enqueuePlayerAction(Context ctx) {
+	PlayerActionRequest request = ctx.bodyAsClass(PlayerActionRequest.class);
+
+	if (request.getPlayerId() == null || request.getPlayerId().isEmpty()) {
+	    ctx.status(400).json(Map.of("success", false, "error", "playerId cannot be blank"));
+	    return;
+	}
+
+	try {
+	    service.enqueuePlayerAction(request);
+	    ctx.json(Map.of("success", true, "message", "Action enqueued"));
+	} catch (Exception e) {
+	    ctx.status(400).json(Map.of("success", false, "error", e.getMessage()));
+	}
+    }
+
+    @Get("/player/{name}/actions")
+    public void getPlayerActionHistory(Context ctx, @Param String name) {
+	int limit = parseLimit(ctx, 20);
+	ctx.json(Map.of("actions", service.getPlayerActionHistory(name, limit)));
     }
 
     @Post("/locations/{name}")
@@ -162,6 +262,71 @@ public final class SimulationController {
 	ctx.json(Map.of("success", true));
     }
 
+    @Post("/actions")
+    public void enqueueAction(Context ctx) {
+	PlayerActionRequest request = ctx.bodyAsClass(PlayerActionRequest.class);
+
+	if (request.getPlayerId() == null || request.getPlayerId().isEmpty()) {
+	    ctx.status(400).json(Map.of("success", false, "error", "playerId cannot be blank"));
+	    return;
+	}
+
+	try {
+	    service.enqueuePlayerAction(request);
+	    ctx.json(Map.of("success", true, "message", "Action enqueued"));
+	} catch (Exception e) {
+	    ctx.status(400).json(Map.of("success", false, "error", e.getMessage()));
+	}
+    }
+
+	@Post("/objects/types/{type}")
+	public void defineObjectType(Context ctx, @Param String type) {
+	ObjectTypeDefinitionRequest request = ctx.bodyAsClass(ObjectTypeDefinitionRequest.class);
+	service.defineObjectType(type, request.getProperties());
+	ctx.json(Map.of("success", true, "type", type));
+	}
+
+	@Get("/objects/types")
+	public void getObjectTypes(Context ctx) {
+	ctx.json(Map.of("types", service.getObjectTypes()));
+	}
+
+	@Get("/objects/types/{type}")
+	public void getObjectType(Context ctx, @Param String type) {
+	ctx.json(service.getObjectType(type));
+	}
+
+	@Post("/objects/{id}")
+	public void upsertObjectInstance(Context ctx, @Param String id) {
+	ObjectInstanceUpsertRequest request = ctx.bodyAsClass(ObjectInstanceUpsertRequest.class);
+	ctx.json(service.upsertObjectInstance(id, request));
+	}
+
+	@Get("/objects/{id}")
+	public void getObjectInstance(Context ctx, @Param String id) {
+	ctx.json(service.getObjectInstance(id));
+	}
+
+	@Get("/objects")
+	public void getObjectInstances(Context ctx) {
+	ctx.json(Map.of("objects", service.getAllObjectInstances()));
+	}
+
+    @Post("/turn")
+    public void processTurn(Context ctx) {
+	try {
+	    RuntimeOrchestrationRequest runtimeRequest = ctx.body().isBlank() ? new RuntimeOrchestrationRequest() : ctx.bodyAsClass(RuntimeOrchestrationRequest.class);
+	    PlayerActionResponse response = service.processNextAction(runtimeRequest);
+	    List<AgentStateResponse> agents = service.getAgents();
+	    List<LocationStateResponse> locations = service.getAllLocations();
+	    List<ConversationResponse> conversations = service.getConversations();
+
+	    ctx.json(Map.of("actionResult", response, "runtimeRequest", runtimeRequest, "agents", agents, "location_states", locations, "conversations", conversations));
+	} catch (Exception e) {
+	    ctx.status(400).json(Map.of("success", false, "error", e.getMessage()));
+	}
+    }
+
     @Post("/state")
     public void updateState(Context ctx) {
 	service.updateState();
@@ -181,11 +346,85 @@ public final class SimulationController {
 	ctx.json(Map.of("agents", agents, "location_states", locations, "conversations", conversations));
     }
 
+    @Get("/state/delta")
+    public void getStateDelta(Context ctx) {
+	List<AgentDeltaStateResponse> agentDeltas = service.getAgentDeltas();
+	List<LocationStateResponse> locations = service.getAllLocations();
+
+	ctx.json(Map.of("agents", agentDeltas, "location_states", locations));
+    }
+
+    @Get("/llm/policy")
+    public void getLlmPolicy(Context ctx) {
+	ctx.json(service.getLlmCallPolicy());
+    }
+
+    @Get("/llm/latency-budget")
+    public void getLatencyBudget(Context ctx) {
+	ctx.json(Map.of("rows", service.getLatencyBudgetTable()));
+    }
+
+	@Post("/runtime/orchestrate")
+	public void orchestrateRuntime(Context ctx) {
+	RuntimeOrchestrationRequest request = ctx.body().isBlank() ? new RuntimeOrchestrationRequest() : ctx.bodyAsClass(RuntimeOrchestrationRequest.class);
+	ctx.json(service.orchestrateRuntime(request));
+	}
+
+	@Get("/runtime/pending-events")
+	public void getPendingRuntimeEvents(Context ctx) {
+	ctx.json(Map.of("pendingReactiveEvents", service.getPendingReactiveEventCount()));
+	}
+
+    @Get("/{x}/{y}")
+    public void getCoordinateSnapshot(Context ctx, @Param String x, @Param String y) {
+	try {
+	    double xCoord = Double.parseDouble(x);
+	    double yCoord = Double.parseDouble(y);
+	    ctx.json(service.getCoordinateSnapshot(xCoord, yCoord));
+	} catch (NumberFormatException e) {
+	    ctx.status(400).json(Map.of("success", false, "error", "x and y must be numeric"));
+	}
+    }
+
+    @Get("/{x}/{y}/location")
+    public void getLocationAtCoordinate(Context ctx, @Param String x, @Param String y) {
+	try {
+	    double xCoord = Double.parseDouble(x);
+	    double yCoord = Double.parseDouble(y);
+	    ctx.json(service.getLocationAtCoordinate(xCoord, yCoord));
+	} catch (NumberFormatException e) {
+	    ctx.status(400).json(Map.of("success", false, "error", "x and y must be numeric"));
+	}
+    }
+
+    @Get("/{x}/{y}/objects")
+    public void getObjectsAtCoordinate(Context ctx, @Param String x, @Param String y) {
+	try {
+	    double xCoord = Double.parseDouble(x);
+	    double yCoord = Double.parseDouble(y);
+	    ctx.json(Map.of("objects", service.getObjectsAtCoordinate(xCoord, yCoord)));
+	} catch (NumberFormatException e) {
+	    ctx.status(400).json(Map.of("success", false, "error", "x and y must be numeric"));
+	}
+    }
+
     @Post("/timestep")
     public void setTimestep(Context ctx) {
 	SetTimestepRequest request = ctx.bodyAsClass(SetTimestepRequest.class);
 	int minutes = Integer.valueOf(request.getNumOfMinutes());
 	SimulationTime.setStep(Duration.ofMinutes(minutes));
 	ctx.json(Map.of("success", true, "message", "Timestep updated to " + minutes + " per update"));
+    }
+
+    private int parseLimit(Context ctx, int defaultValue) {
+	String rawLimit = ctx.queryParam("limit");
+	if (rawLimit == null || rawLimit.isBlank()) {
+	    return defaultValue;
+	}
+	try {
+	    return Integer.parseInt(rawLimit);
+	} catch (NumberFormatException e) {
+	    return defaultValue;
+	}
     }
 }

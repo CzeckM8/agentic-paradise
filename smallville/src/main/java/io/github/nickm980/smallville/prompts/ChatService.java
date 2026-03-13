@@ -342,4 +342,21 @@ public class ChatService implements Prompts {
 	
 	return new Dialog(agent.getFullName(), result);
     }
+
+    @Override
+    public void updateCurrentActivity(Agent agent) {
+	CurrentActivity activity = getCurrentActivity(agent);
+	agent.setCurrentActivity(activity.getActivity());
+	agent.setCurrentEmoji(activity.getEmoji());
+
+	String desiredLocation = activity.getLocation();
+	if (desiredLocation != null && !desiredLocation.isBlank()) {
+	    world.getLocation(desiredLocation).ifPresentOrElse(loc -> {
+		agent.setTargetLocation(loc.getFullPath());
+		if (agent.getLocation() != null && agent.getLocation().getFullPath().equals(loc.getFullPath())) {
+		    agent.setTargetLocation(null);
+		}
+	    }, () -> LOG.debug("Location not found for activity: {}", desiredLocation));
+	}
+    }
 }
