@@ -1,6 +1,6 @@
 # For Ollama (local)
 apiPath: http://localhost:11434/v1/chat/completions
-model: gemma3:4b
+model: llama3.1:8b-instruct-q4_K_M
 timeFormat: h:mm a
 fullTimeFormat: EEEE, MMMM d, h:mm a
 yesterdayFormat: EEEE MMMM d
