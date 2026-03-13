@@ -1,0 +1,74 @@
+package io.github.nickm980.smallville.api.v1.dto;
+
+/**
+ * Lightweight agent state for delta updates - only essential data
+ * Reduces payload size compared to full AgentStateResponse
+ */
+public class AgentDeltaStateResponse {
+    private String name;
+    private String location;
+    private String currentAction;
+    private String emoji;
+    private double stressLevel;
+    private String mentalState;
+
+    public AgentDeltaStateResponse() {}
+
+    public AgentDeltaStateResponse(String name, String location, String currentAction, 
+                                   String emoji, double stressLevel, String mentalState) {
+        this.name = name;
+        this.location = location;
+        this.currentAction = currentAction;
+        this.emoji = emoji;
+        this.stressLevel = stressLevel;
+        this.mentalState = mentalState;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getLocation() {
+        return location;
+    }
+
+    public void setLocation(String location) {
+        this.location = location;
+    }
+
+    public String getCurrentAction() {
+        return currentAction;
+    }
+
+    public void setCurrentAction(String currentAction) {
+        this.currentAction = currentAction;
+    }
+
+    public String getEmoji() {
+        return emoji;
+    }
+
+    public void setEmoji(String emoji) {
+        this.emoji = emoji;
+    }
+
+    public double getStressLevel() {
+        return stressLevel;
+    }
+
+    public void setStressLevel(double stressLevel) {
+        this.stressLevel = stressLevel;
+    }
+
+    public String getMentalState() {
+        return mentalState;
+    }
+
+    public void setMentalState(String mentalState) {
+        this.mentalState = mentalState;
+    }
+}

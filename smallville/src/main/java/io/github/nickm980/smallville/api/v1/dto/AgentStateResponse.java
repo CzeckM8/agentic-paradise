@@ -6,6 +6,8 @@ public class AgentStateResponse {
     private String location;
     private String emoji;
     private String object;
+    private double x;
+    private double y;
     
     public String getObject() {
 	return object;
@@ -40,6 +42,22 @@ public class AgentStateResponse {
     }
     public void setEmoji(String emoji) {
         this.emoji = emoji;
+    }
+
+    public double getX() {
+        return x;
+    }
+
+    public void setX(double x) {
+        this.x = x;
+    }
+
+    public double getY() {
+        return y;
+    }
+
+    public void setY(double y) {
+        this.y = y;
     }
     
     

@@ -26,6 +26,21 @@ public class ModelMapper {
 	    result.setLocation(agent.getLocation().getFullPath());
 	}
 	result.setName(agent.getFullName());
+	result.setX(agent.getX());
+	result.setY(agent.getY());
+	return result;
+    }
+
+    public AgentDeltaStateResponse fromAgentDelta(Agent agent) {
+	AgentDeltaStateResponse result = new AgentDeltaStateResponse();
+	result.setName(agent.getFullName());
+	if (agent.getLocation() != null) {
+	    result.setLocation(agent.getLocation().getFullPath());
+	}
+	result.setCurrentAction(agent.getCurrentActivity());
+	result.setEmoji(agent.getEmoji());
+	result.setStressLevel(agent.getStressLevel());
+	result.setMentalState(agent.getMentalState());
 	return result;
     }
 
@@ -33,6 +48,11 @@ public class ModelMapper {
 	LocationStateResponse result = new LocationStateResponse();
 	result.setName(location.getFullPath());
 	result.setState(location.getState());
+	result.setType(location.getType());
+	result.setMinX(location.getMinX());
+	result.setMaxX(location.getMaxX());
+	result.setMinY(location.getMinY());
+	result.setMaxY(location.getMaxY());
 	return result;
     }
 
