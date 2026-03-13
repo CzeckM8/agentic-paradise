@@ -10,10 +10,11 @@ var current_location = ""
 # For smooth movement
 var target_position = Vector2.ZERO
 var move_speed = 200.0  # pixels per second
+var has_initial_position = false
 
 func _ready():
-	# Default appearance (colored square for now)
-	sprite.texture = _create_placeholder_texture()
+	# Default appearance: diamond marker with white outline.
+	sprite.texture = _create_diamond_texture()
 	label.position = Vector2(-40, -40)
 	label.add_theme_font_size_override("font_size", 12)
 	target_position = position
@@ -23,23 +24,42 @@ func _process(delta):
 	if position.distance_to(target_position) > 5:
 		position = position.move_toward(target_position, move_speed * delta)
 
-func update_from_backend(data, location_map):
-	"""Update agent based on backend data"""
+func update_from_backend(data, location_map, preset_position: Vector2 = Vector2.ZERO):
+	"""Update agent based on backend data.
+	If preset_position is provided, use it instead of computing from location_map
+	(grid-based spacing from backend_connector.gd)"""
 	agent_name = data.get("name", "unknown")
-	current_activity = data.get("activity", "idle")
+	current_activity = data.get("activity", data.get("action", data.get("currentAction", "idle")))
 	current_location = data.get("location", "unknown")
 	
-	# Update target position based on location
-	if location_map.has(current_location):
-		target_position = location_map[current_location]
-		# Add slight randomness so agents don't stack perfectly
-		target_position += Vector2(randf_range(-20, 20), randf_range(-20, 20))
+	# Prefer server-authoritative coordinates when available.
+	if data.has("x") and data.has("y"):
+		target_position = Vector2(float(data.get("x", 0.0)), float(data.get("y", 0.0)))
+	# Fallback to preset position (legacy client-side grid spacing)
+	elif preset_position != Vector2.ZERO:
+		target_position = preset_position
+	# Otherwise compute from location center
+	elif location_map.has(current_location):
+		var location_data = location_map[current_location]
+		if location_data is Dictionary:
+			# Extract center coordinates from location bounds
+			var center_x = location_data.get("centerX", 50.0)
+			var center_y = location_data.get("centerY", 50.0)
+			target_position = Vector2(center_x, center_y)
+		else:
+			# Fallback for non-dict location data
+			target_position = location_data as Vector2
 	
 	# Update label
 	_update_label()
 	
 	# Update color based on activity keywords
 	_update_appearance()
+
+	# On first backend sync, spawn exactly at resolved coordinates (no fly-in).
+	if not has_initial_position:
+		position = target_position
+		has_initial_position = true
 
 func _update_label():
 	"""Update the text label above the agent"""
@@ -67,10 +87,23 @@ func _update_appearance():
 	else:
 		sprite.modulate = Color.WHITE
 
-func _create_placeholder_texture():
-	"""Create a simple colored square as placeholder sprite"""
-	var img = Image.create(32, 32, false, Image.FORMAT_RGBA8)
-	img.fill(Color.DODGER_BLUE)
+func _create_diamond_texture():
+	"""Create a diamond-shaped marker with a white outline."""
+	var size = 32
+	var img = Image.create(size, size, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+
+	var center = Vector2i(size / 2, size / 2)
+	var radius = 11
+
+	for x in range(size):
+		for y in range(size):
+			var d = abs(x - center.x) + abs(y - center.y)
+			if d <= radius:
+				img.set_pixel(x, y, Color(0.39, 0.40, 0.95, 0.95))
+			elif d <= radius + 1:
+				img.set_pixel(x, y, Color(1, 1, 1, 1))
+
 	return ImageTexture.create_from_image(img)
 
 func get_agent_info():

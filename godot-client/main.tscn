@@ -1,6 +1,7 @@
-[gd_scene load_steps=2 format=3 uid="uid://dpsdohc4swhjh"]
+[gd_scene load_steps=3 format=3 uid="uid://dpsdohc4swhjh"]
 
 [ext_resource type="Script" uid="uid://c6iv1qo62j6d6" path="res://backend_connector.gd" id="1_ig7tw"]
+[ext_resource type="Script" uid="uid://beywxueyfrsuu" path="res://camera.gd" id="2_0xm2m"]
 
 [node name="Main" type="Node2D"]
 
@@ -13,6 +14,9 @@ script = ExtResource("1_ig7tw")
 
 [node name="Agents" type="Node2D" parent="World"]
 
+[node name="Camera" type="Camera2D" parent="World"]
+script = ExtResource("2_0xm2m")
+
 [node name="UI" type="CanvasLayer" parent="."]
 
 [node name="DebugLabel" type="Label" parent="UI"]
@@ -21,3 +25,19 @@ offset_right = 40.0
 offset_bottom = 23.0
 theme_override_font_sizes/font_size = 14
 text = "Connecting to backend..."
+
+[node name="ControlsLabel" type="Label" parent="UI"]
+offset_left = 10.0
+offset_top = 30.0
+offset_right = 400.0
+offset_bottom = 150.0
+theme_override_font_sizes/font_size = 12
+text = "CONTROLS:
+WASD: Move player within location
+Arrow Keys: Pan camera
+SPACE: Interact with nearby agents
+E: Speak
+Q: Attack nearby agents
+
+Blue circle = Player
+Diamond markers = NPCs"
