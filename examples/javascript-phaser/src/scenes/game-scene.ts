@@ -249,6 +249,80 @@ export class GameScene extends Phaser.Scene {
         this.entities = entities
     }
 
+    drawLocationPlaceholders(): void {
+        const locations = this.map.getObjectLayer('locations')
+        if (!locations) {
+            return
+        }
+
+        // Color map for location types
+        const getLocationColor = (name: string): number => {
+            const lower = name.toLowerCase()
+            if (lower.includes('market') || lower.includes('grocery')) return 0x22c55e // Green
+            if (lower.includes('tavern') || lower.includes('bar')) return 0xea580c // Orange
+            if (lower.includes('cafe') || lower.includes('coffee') || lower.includes('shop')) return 0xeab308 // Yellow
+            if (lower.includes('home') || lower.includes('house') || lower.includes('residential')) return 0x3b82f6 // Blue
+            return 0xa855f7 // Purple default
+        }
+
+        for (const location of locations.objects) {
+            // Draw colored background rectangle (behind everything)
+            const bgWidth = 120
+            const bgHeight = 80
+            const bg = this.add.rectangle(location.x, location.y, bgWidth, bgHeight)
+            bg.setFillStyle(getLocationColor(location.name), 0.25)
+            bg.setDepth(9995)
+
+            // Draw location marker circle on top
+            const marker = this.add.circle(location.x, location.y, 8, 0x4ecdc4, 0.9)
+            marker.setDepth(9998)
+
+            // Draw location label
+            const label = this.add.text(location.x + 12, location.y - 12, location.name, {
+                font: '12px Courier New',
+                color: '#0f172a',
+                backgroundColor: '#fef3c7',
+                padding: { x: 4, y: 2 },
+            })
+            label.setDepth(9999)
+        }
+    }
+
+    drawEntrancePlaceholders(): void {
+        const walls = this.map.getObjectLayer('walls')
+        if (!walls) {
+            return
+        }
+
+        for (const object of walls.objects) {
+            const properties = object.properties || []
+            const isTeleport = properties.some((property: any) => property.name === 'teleport' && property.value)
+
+            if (!isTeleport) {
+                continue
+            }
+
+            const width = object.width || 16
+            const height = object.height || 16
+            const centerX = object.x + width / 2
+            const centerY = object.y + height / 2
+
+            const outline = this.add.rectangle(centerX, centerY, width + 8, height + 8)
+            outline.setStrokeStyle(2, 0xff9f1c, 1)
+            outline.setFillStyle(0xff9f1c, 0.18)
+            outline.setDepth(9997)
+
+            const label = this.add.text(centerX, centerY - height, 'ENTRANCE', {
+                font: '11px Courier New',
+                color: '#fff7ed',
+                backgroundColor: '#9a3412',
+                padding: { x: 4, y: 2 },
+            })
+            label.setOrigin(0.5, 1)
+            label.setDepth(9999)
+        }
+    }
+
     create(): void {
         function createNavMesh(scene: any, map: Phaser.Tilemaps.Tilemap) {
             const objects = map.getObjectLayer('bounds')
@@ -261,6 +335,8 @@ export class GameScene extends Phaser.Scene {
         this.loadTilemap()
         this.createLocations()
         createNavMesh(this, this.map)
+        this.drawLocationPlaceholders()
+        this.drawEntrancePlaceholders()
         this.spawnAgents()
         this.createChatBox()
         this.spawnObjects()

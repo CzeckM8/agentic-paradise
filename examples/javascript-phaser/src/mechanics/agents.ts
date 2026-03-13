@@ -129,9 +129,12 @@ function createAgent({
     }
     loadAnimations(scene, name, skin)
 
+    const initialLocation = getLocation(location)
+    const spawnX = initialLocation ? initialLocation.getX() : 0
+    const spawnY = initialLocation ? initialLocation.getY() : 0
+
     updateHTMLElement({ name, location, activity })
-    var player = scene.add.sprite(0, 0, name)
-    var group = scene.add.container()
+    var group = scene.add.container(spawnX, spawnY)
 
     var dialog = scene.add.sprite(25, -30, 'dialog')
     dialog.setScale(0.75)
@@ -145,20 +148,32 @@ function createAgent({
         font: '16px Courier New',
         backgroundColor: '#fffff',
     })
-    // dialog.addChild(text)
-    // player.addChild(dialog)
     activityText.visible = false
 
-    const graphics = scene.add.graphics({ lineStyle: { color: 0xff0000 } });
-
-    const circle = new Phaser.Geom.Circle(0, 0, 100);
-    graphics.strokeCircleShape(circle);
+    // Create diamond-shaped agent marker with white outline
+    const diamondGraphics = scene.add.graphics()
+    
+    // Draw diamond shape (rotated square)
+    const diamondSize = 12
+    diamondGraphics.fillStyle(0x6366f1, 0.8)  // Indigo fill
+    diamondGraphics.lineStyle(2, 0xffffff, 1)  // White outline
+    
+    // Diamond points: top, right, bottom, left
+    const points = [
+        new Phaser.Geom.Point(0, -diamondSize),      // top
+        new Phaser.Geom.Point(diamondSize, 0),       // right
+        new Phaser.Geom.Point(0, diamondSize),       // bottom
+        new Phaser.Geom.Point(-diamondSize, 0)       // left
+    ]
+    
+    diamondGraphics.fillPoints(points, true)
+    diamondGraphics.strokePoints(points, true)
 
     group.add(dialog)
-    group.add(graphics)
+    group.add(diamondGraphics)
     group.add(activityText)
     group.add(emoji)
-    group.add(player)
+    // Intentionally no character sprite: render-only diamond marker for clarity.
 
 
 
@@ -174,10 +189,7 @@ function createAgent({
     })
 
     agents.push(agent)
-    player.play(name + '-idle')
-
     console.log('[Agent] Created a new agent ' + name)
-    moveAgent({ name: name, locationName: location })
 }
 
 function moveAgent({
