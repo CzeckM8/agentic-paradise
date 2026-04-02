@@ -13,8 +13,9 @@ Based on: [nmater1/smallville](https://github.com/nmater1/smallville) (Apache 2.
 mvn clean package
 java -jar target/smallville-1.3.0.jar --port 8080
 
-If the server requires an API key in your local config, run:
-`java -jar target/smallville-1.3.0.jar --api-key o --port 8080`
+By default, the server now uses a fake local key (`dev-fake-key`) for development.
+To override it, run:
+`java -jar target/smallville-1.3.0.jar --api-key your-real-key --port 8080`
 
 ## Architecture
 - `GET /{x}/{y}`

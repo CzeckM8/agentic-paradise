@@ -31,32 +31,64 @@ var action_feedback_duration = 0.3  # Brief visual feedback duration
 # Reference to backend connector
 var backend_connector = null
 
+# ── Sprite sheet configuration ──────────────────────────────────────
+# Uses the same 16x16 RPG sprite pack as agents.
+# Player uses a specific sheet + variant to look distinct.
+const FRAME_SIZE := 16
+const FRAMES_PER_DIRECTION := 6
+const DIRECTIONS_PER_VARIANT := 4
+const SPRITE_SCALE := 3.0
+
+enum Dir { DOWN = 0, LEFT = 1, RIGHT = 2, UP = 3 }
+
+# Player sprite: uses the scout sheet, variant 0 (to stand out from NPCs).
+# Change this path/variant to whatever you prefer.
+var player_sprite_path := "res://assets/sprites/agents/04-scout.png"
+var player_variant := 0
+
+var _current_dir := Dir.DOWN
+var _anim_frame := 0
+var _anim_timer := 0.0
+var _anim_speed := 0.15  # slightly faster animation than NPCs
+var _sheet_cols := 12
+var _sheet_rows := 8
+
 func _ready():
-	# Create a distinctive player sprite (larger than agents)
-	var texture = _create_player_texture()
-	if texture:
-		sprite.texture = texture
-		sprite.position = Vector2.ZERO  # Center the sprite
+	# ── Set up sprite from sprite sheet ──
+	sprite.region_enabled = true
+	sprite.scale = Vector2(SPRITE_SCALE, SPRITE_SCALE)
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sprite.position = Vector2.ZERO
+
+	var tex = load(player_sprite_path)
+	if tex:
+		sprite.texture = tex
+		_sheet_cols = int(tex.get_width()) / FRAME_SIZE
+		_sheet_rows = int(tex.get_height()) / FRAME_SIZE
+		_update_sprite_region()
 		sprite.visible = true
-		print("Player sprite created and visible")
+		print("Player sprite loaded from sheet")
 	else:
-		print("Failed to create player texture")
-	
+		# Fallback to old procedural texture if sprite file is missing
+		sprite.region_enabled = false
+		sprite.texture = _create_player_texture()
+		print("Player sprite fallback: procedural texture")
+
 	label.position = Vector2(-50, -50)
 	label.add_theme_font_size_override("font_size", 14)
 	target_position = position
 	_update_label()
-	
+
 	# Get reference to backend connector
 	backend_connector = get_node("../../../BackendConnector")
 	if backend_connector:
 		print("Backend connector found")
 	else:
 		print("Backend connector NOT found")
-	
+
 	# Enable input processing
 	set_process_input(true)
-	
+
 	# Set initial position to be visible and snapped to tile grid.
 	position = Vector2(750, 900)
 	if backend_connector:
@@ -73,29 +105,41 @@ func _process(delta):
 	# Handle action cooldown
 	if action_cooldown > 0:
 		action_cooldown -= delta
-	
+
 	# Handle action feedback timer
 	if action_feedback_timer > 0:
 		action_feedback_timer -= delta
 		if action_feedback_timer <= 0:
-			# Reset to normal appearance
 			_update_appearance()
-	
-	# Keep backend synchronized for non-movement updates and safety.
+
+	# Keep backend synchronized
 	_sync_movement_to_backend(delta)
-	
-	# Handle smooth movement towards target (for location changes or other movements)
+
+	# Handle smooth movement towards target
 	if position.distance_to(target_position) > 5:
+		var old_pos = position
 		position = position.move_toward(target_position, move_speed * delta)
 		is_moving = true
+		_update_direction_from_movement(position - old_pos)
 		if current_activity != "moving":
 			current_activity = "moving"
 			_update_label()
 	else:
-		# Only set to idle if not currently moving via WASD
 		if not is_moving and current_activity == "moving":
 			current_activity = "idle"
 			_update_label()
+
+	# ── Walk animation ──
+	if is_moving:
+		_anim_timer += delta
+		if _anim_timer >= _anim_speed:
+			_anim_timer = 0.0
+			_anim_frame = (_anim_frame + 1) % FRAMES_PER_DIRECTION
+			_update_sprite_region()
+	else:
+		if _anim_frame != 0:
+			_anim_frame = 0
+			_update_sprite_region()
 
 func _input(event):
 	if event is InputEventKey:
@@ -104,14 +148,19 @@ func _input(event):
 			var move_direction = Vector2.ZERO
 			if event.keycode == KEY_W:
 				move_direction = Vector2(0, -1)
+				_current_dir = Dir.UP
 			elif event.keycode == KEY_S:
 				move_direction = Vector2(0, 1)
+				_current_dir = Dir.DOWN
 			elif event.keycode == KEY_A:
 				move_direction = Vector2(-1, 0)
+				_current_dir = Dir.LEFT
 			elif event.keycode == KEY_D:
 				move_direction = Vector2(1, 0)
+				_current_dir = Dir.RIGHT
 
 			if move_direction != Vector2.ZERO:
+				_update_sprite_region()  # Update facing direction immediately
 				_try_step_move(move_direction)
 				return
 
@@ -127,12 +176,42 @@ func _input(event):
 			elif event.keycode == KEY_Q:
 				_try_attack_nearby()
 				action_taken = true
-			
+
 			if action_taken:
 				action_cooldown = action_cooldown_time
-				# Visual feedback for action
 				action_feedback_timer = action_feedback_duration
-				sprite.modulate = Color.YELLOW  # Brief yellow flash for action feedback
+				sprite.modulate = Color.YELLOW  # Brief yellow flash
+
+# ── Sprite helpers ──────────────────────────────────────────────────
+
+func _update_sprite_region():
+	"""Set the region rect to display the correct frame from the sheet."""
+	if not sprite.region_enabled:
+		return  # Using fallback texture
+
+	var chars_wide = _sheet_cols / FRAMES_PER_DIRECTION
+	var block_col = player_variant % chars_wide
+	var block_row = player_variant / chars_wide
+
+	var block_x = block_col * FRAMES_PER_DIRECTION * FRAME_SIZE
+	var block_y = block_row * DIRECTIONS_PER_VARIANT * FRAME_SIZE
+
+	var px_x = block_x + _anim_frame * FRAME_SIZE
+	var px_y = block_y + _current_dir * FRAME_SIZE
+
+	sprite.region_rect = Rect2(px_x, px_y, FRAME_SIZE, FRAME_SIZE)
+
+func _update_direction_from_movement(delta_vec: Vector2):
+	"""Set facing direction based on movement vector."""
+	if delta_vec.length_squared() < 0.01:
+		return
+	if abs(delta_vec.x) > abs(delta_vec.y):
+		_current_dir = Dir.RIGHT if delta_vec.x > 0 else Dir.LEFT
+	else:
+		_current_dir = Dir.DOWN if delta_vec.y > 0 else Dir.UP
+	_update_sprite_region()
+
+# ── Movement (unchanged logic, same as original) ───────────────────
 
 func _try_step_move(direction: Vector2):
 	"""Move exactly one adjacent tile (W/A/S/D) if bounds and occupancy allow it."""
@@ -171,56 +250,49 @@ func _try_step_move(direction: Vector2):
 func _move_in_direction(direction: Vector2):
 	"""Move player smoothly in a direction within current location bounds"""
 	if backend_connector:
-		# Get current location bounds
 		var location_data = backend_connector.get_location_data(current_location)
 		if location_data.is_empty():
 			print("No location data for: ", current_location)
 			return
-		
-		# Calculate new position
-		var move_distance = 50.0  # Distance to move per key press
+
+		var move_distance = 50.0
 		var new_position = position + direction * move_distance
-		
-		# Clamp to location bounds
+
 		var min_x = location_data.get("minX", 0.0)
 		var max_x = location_data.get("maxX", 1000.0)
 		var min_y = location_data.get("minY", 0.0)
 		var max_y = location_data.get("maxY", 1000.0)
-		
+
 		new_position.x = clamp(new_position.x, min_x, max_x)
 		new_position.y = clamp(new_position.y, min_y, max_y)
-		
-		# Set target position for smooth movement
+
 		target_position = new_position
 		is_moving = true
 		current_activity = "moving"
 		_update_label()
-		
+
 		print("Moving to: ", new_position, " in location: ", current_location)
 
 func _try_move_to_location(location_name: String):
 	"""Attempt to move to a location"""
 	if backend_connector:
-		# Get location bounds to send appropriate coordinates
 		var location_data = backend_connector.get_location_data(location_name)
 		var target_x = location_data.get("centerX", 50.0)
 		var target_y = location_data.get("centerY", 50.0)
-		
-		# Enqueue move action
+
 		backend_connector.enqueue_player_action(
 			player_name,
 			"move",
-			"",  # no target agent
-			location_name,  # target location
-			target_x, target_y,  # target position within location
+			"",
+			location_name,
+			target_x, target_y,
 			"Moving to " + location_name
 		)
-		
-		# Update local state optimistically
+
 		current_location = location_name
 		current_activity = "moving to " + location_name
 		_update_label()
-		
+
 		print("Player moving to: ", location_name, " at position: ", target_x, ", ", target_y)
 
 func _try_interact_nearby():
@@ -228,20 +300,20 @@ func _try_interact_nearby():
 	if backend_connector:
 		var nearby_agents = _get_nearby_agents()
 		if nearby_agents.size() > 0:
-			var target_agent = nearby_agents[0]  # Interact with first nearby agent
-			
+			var target_agent = nearby_agents[0]
+
 			backend_connector.enqueue_player_action(
 				player_name,
 				"interact",
 				target_agent,
-				"",  # no target location
+				"",
 				position.x, position.y,
 				"Interacting with " + target_agent
 			)
-			
+
 			current_activity = "interacting with " + target_agent
 			_update_label()
-			
+
 			print("Player interacting with: ", target_agent)
 		else:
 			print("No nearby agents to interact with")
@@ -252,16 +324,16 @@ func _try_speak(message: String):
 		backend_connector.enqueue_player_action(
 			player_name,
 			"speak",
-			"",  # no target agent
-			"",  # no target location
+			"",
+			"",
 			position.x, position.y,
 			"Speaking",
 			message
 		)
-		
+
 		current_activity = "speaking"
 		_update_label()
-		
+
 		print("Player speaking: ", message)
 
 func _try_attack_nearby():
@@ -269,23 +341,23 @@ func _try_attack_nearby():
 	if backend_connector:
 		var nearby_agents = _get_nearby_agents()
 		if nearby_agents.size() > 0:
-			var target_agent = nearby_agents[0]  # Attack first nearby agent
-			
+			var target_agent = nearby_agents[0]
+
 			backend_connector.enqueue_player_action(
 				player_name,
 				"attack",
 				target_agent,
-				"",  # no target location
+				"",
 				position.x, position.y,
 				"Attacking " + target_agent,
-				"",  # no speak text
-				0.8,  # high intensity
-				""  # no item
+				"",
+				0.8,
+				""
 			)
-			
+
 			current_activity = "attacking " + target_agent
 			_update_label()
-			
+
 			print("Player attacking: ", target_agent)
 		else:
 			print("No nearby agents to attack")
@@ -326,15 +398,13 @@ func update_from_backend(data: Dictionary, location_map: Dictionary):
 	current_location = data.get("location", "market")
 	stress_level = data.get("stress", 0.5)
 
-	# Use authoritative coordinates when the backend returns them.
 	if data.has("x") and data.has("y"):
 		var backend_pos = Vector2(float(data.get("x", position.x)), float(data.get("y", position.y)))
 		if backend_connector:
 			backend_pos = backend_connector.snap_to_tile(backend_pos)
 		position = backend_pos
 		target_position = backend_pos
-	
-	# Update target position based on location
+
 	if not (data.has("x") and data.has("y")) and location_map.has(current_location):
 		var location_data = location_map[current_location]
 		if location_data is Dictionary:
@@ -343,12 +413,10 @@ func update_from_backend(data: Dictionary, location_map: Dictionary):
 			target_position = Vector2(center_x, center_y)
 		else:
 			target_position = location_data as Vector2
-	
-	# Update appearance
+
 	_update_appearance()
 	_update_label()
 
-	# Ensure first backend sync places player immediately at resolved coordinates.
 	if not has_initial_backend_position:
 		position = target_position
 		last_synced_position = position
@@ -388,43 +456,37 @@ func _update_label():
 	if backend_connector:
 		location_text = backend_connector.get_location_display_name(current_location)
 	label.text = "%s\n%s\n@ %s\nStress: %.1f" % [
-		player_name, 
-		current_activity, 
+		player_name,
+		current_activity,
 		location_text,
 		stress_level * 100
 	]
 
 func _update_appearance():
-	"""Change color based on stress level"""
+	"""Change color tint based on stress level (subtle, preserves sprite art)."""
 	if stress_level < 0.3:
-		# Low stress - green/calm
-		sprite.modulate = Color.GREEN
+		sprite.modulate = Color(0.7, 1.0, 0.7)   # slight green tint
 	elif stress_level < 0.7:
-		# Medium stress - yellow
-		sprite.modulate = Color.YELLOW
+		sprite.modulate = Color(1.0, 1.0, 0.7)   # slight yellow tint
 	else:
-		# High stress - red/agitated
-		sprite.modulate = Color.RED
+		sprite.modulate = Color(1.0, 0.7, 0.7)   # slight red tint
 
 func _create_player_texture():
-	"""Create a distinctive player sprite at roughly agent size."""
+	"""Fallback: create a distinctive player sprite if sprite sheet is missing."""
 	var img = Image.create(32, 32, false, Image.FORMAT_RGBA8)
-	
-	# Draw a circle in the center
+
 	var center = Vector2(16, 16)
 	var radius = 13
-	
+
 	for x in range(32):
 		for y in range(32):
 			var pixel_pos = Vector2(x, y)
 			var dist = pixel_pos.distance_to(center)
 			if dist <= radius:
-				# Filled circle
 				img.set_pixel(x, y, Color.DODGER_BLUE)
 			elif dist <= radius + 3:
-				# Border
 				img.set_pixel(x, y, Color.WHITE)
-	
+
 	return ImageTexture.create_from_image(img)
 
 func get_player_info() -> Dictionary:

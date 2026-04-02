@@ -15,8 +15,8 @@ var tile_size = 32.0
 @onready var world_node = get_node("../World")
 
 # Agent and Player scenes to instantiate
-var agent_scene = preload("res://agent.tscn")
-var player_scene = preload("res://player.tscn")
+var agent_scene = preload("res://scenes/agent.tscn")
+var player_scene = preload("res://scenes/player.tscn")
 
 # Track spawned agents, player, and locations
 var agent_nodes = {}
@@ -49,8 +49,22 @@ func _ready():
 		print("No saved state, creating new world...")
 		await _initialize_new_world()
 	
-	# NOW fetch locations after world is fully initialized
+	# Populate local locations immediately from the hardcoded config so
+	# the player can move even if the backend GET /locations is slow or empty.
+	_ensure_fallback_locations()
+	
+	# Give the server a moment to finish processing location POSTs, then fetch.
+	await get_tree().create_timer(2.0).timeout
 	_fetch_locations()
+	
+	# Final fallback: if fetch_locations still returned nothing after another
+	# short wait, the hardcoded locations are already in place from above.
+	await get_tree().create_timer(2.0).timeout
+	if locations.size() == 0:
+		print("[WARN] Backend returned no locations — using hardcoded fallback")
+		_ensure_fallback_locations()
+	else:
+		print("[OK] Locations loaded from backend: ", locations.keys())
 
 func _wait_for_backend_ready() -> bool:
 	"""Verify backend availability and optionally start it via bat file."""
@@ -198,6 +212,34 @@ func _on_location_created(result, response_code, headers, body, http):
 	# Now it's safe to free
 	if is_instance_valid(http):
 		http.queue_free()
+
+func _ensure_fallback_locations():
+	"""Populate the local locations dictionary from the hardcoded config.
+	This guarantees the player can resolve positions even when the backend
+	GET /locations endpoint returns an empty list (timing / schema mismatch)."""
+	var fallback_config = {
+		"market": {"type": "market", "minX": 0, "maxX": 600, "minY": 0, "maxY": 500},
+		"tavern": {"type": "tavern", "minX": 700, "maxX": 1200, "minY": 0, "maxY": 450},
+		"coffee_shop": {"type": "cafe", "minX": 1300, "maxX": 1800, "minY": 0, "maxY": 400},
+		"town_square": {"type": "public", "minX": 400, "maxX": 1100, "minY": 600, "maxY": 1200},
+		"home": {"type": "residential", "minX": 80, "maxX": 350, "minY": 620, "maxY": 980}
+	}
+	for loc_name in fallback_config.keys():
+		if not locations.has(loc_name):
+			var d = fallback_config[loc_name]
+			locations[loc_name] = {
+				"name": loc_name,
+				"type": d["type"],
+				"minX": d["minX"],
+				"maxX": d["maxX"],
+				"minY": d["minY"],
+				"maxY": d["maxY"],
+				"centerX": (d["minX"] + d["maxX"]) / 2.0,
+				"centerY": (d["minY"] + d["maxY"]) / 2.0
+			}
+	print("[FALLBACK] Locations populated: ", locations.keys())
+	_redraw_location_overlays()
+
 func _fetch_locations():
 	"""GET request to fetch all locations"""
 	var http = HTTPRequest.new()
@@ -864,10 +906,15 @@ func _load_and_initialize_state():
 
 # Dev Testing actions
 func _input(event):
-	"""Handle keyboard shortcuts"""
+	"""Handle keyboard shortcuts — uses modifier keys to avoid conflict with WASD player movement."""
 	if event is InputEventKey and event.pressed:
-		# Press 'S' to save state
-		if event.keycode == KEY_S:
+		# ESC to open pause menu
+		if event.keycode == KEY_ESCAPE:
+			get_tree().change_scene_to_file("res://scenes/ui/pauseMenu.tscn")
+			return
+
+		# Ctrl+S to save state (was bare S, which conflicted with WASD)
+		if event.keycode == KEY_S and event.ctrl_pressed:
 			print("Saving state...")
 			_save_state()
 		
@@ -878,24 +925,6 @@ func _input(event):
 		# Press 'N' to create a new random agent
 		if event.keycode == KEY_N:
 			_create_random_agent()
-		
-		# Press 'A' to test player action (attack) - OLD METHOD, keeping for reference
-		if event.keycode == KEY_A:
-			if agent_nodes.has("Klaus") and agent_nodes.has("Maria"):
-				# Test attack action
-				enqueue_player_action(
-					"Klaus",  # player
-					"attack",  # action type
-					"Maria",  # target agent
-					"",  # target location
-					50.0, 50.0,  # player x, y
-					"Klaus attacks Maria",  # description
-					"",  # speak text
-					0.7,  # intensity
-					"knife"  # item
-				)
-			else:
-				print("Klaus or Maria not found")
 
 func _create_random_agent():
 	"""Create a random agent for testing"""

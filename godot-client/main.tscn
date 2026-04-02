@@ -1,43 +1,23 @@
-[gd_scene load_steps=3 format=3 uid="uid://dpsdohc4swhjh"]
+[gd_scene format=3 uid="uid://b2y4vdoxuaq0w"]
 
-[ext_resource type="Script" uid="uid://c6iv1qo62j6d6" path="res://backend_connector.gd" id="1_ig7tw"]
-[ext_resource type="Script" uid="uid://beywxueyfrsuu" path="res://camera.gd" id="2_0xm2m"]
+[ext_resource type="Script" path="res://backend_connector.gd" id="1_ig7tw"]
 
-[node name="Main" type="Node2D"]
+[node name="Main" type="Node2D" unique_id=1786787812]
 
-[node name="BackendConnector" type="Node" parent="."]
+[node name="BackendConnector" type="Node" parent="." unique_id=868497313]
 script = ExtResource("1_ig7tw")
 
-[node name="World" type="Node2D" parent="."]
+[node name="World" type="Node2D" parent="." unique_id=770267203]
 
-[node name="TileMapLayer" type="TileMapLayer" parent="World"]
+[node name="TileMapLayer" type="TileMapLayer" parent="World" unique_id=781510670]
 
-[node name="Agents" type="Node2D" parent="World"]
+[node name="Agents" type="Node2D" parent="World" unique_id=1855135849]
 
-[node name="Camera" type="Camera2D" parent="World"]
-script = ExtResource("2_0xm2m")
+[node name="UI" type="CanvasLayer" parent="." unique_id=790030793]
 
-[node name="UI" type="CanvasLayer" parent="."]
-
-[node name="DebugLabel" type="Label" parent="UI"]
+[node name="DebugLabel" type="Label" parent="UI" unique_id=923159534]
 custom_minimum_size = Vector2(10, 10)
 offset_right = 40.0
 offset_bottom = 23.0
 theme_override_font_sizes/font_size = 14
 text = "Connecting to backend..."
-
-[node name="ControlsLabel" type="Label" parent="UI"]
-offset_left = 10.0
-offset_top = 30.0
-offset_right = 400.0
-offset_bottom = 150.0
-theme_override_font_sizes/font_size = 12
-text = "CONTROLS:
-WASD: Move player within location
-Arrow Keys: Pan camera
-SPACE: Interact with nearby agents
-E: Speak
-Q: Attack nearby agents
-
-Blue circle = Player
-Diamond markers = NPCs"
