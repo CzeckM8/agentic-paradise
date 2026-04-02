@@ -1,5 +1,7 @@
 package io.github.nickm980.smallville.api.v1.dto;
 
+import java.util.List;
+
 public class AgentStateResponse {
     private String name;
     private String action;
@@ -8,6 +10,8 @@ public class AgentStateResponse {
     private String object;
     private double x;
     private double y;
+    private AgentActionStateResponse activeAction;
+    private List<AgentActionStateResponse> queuedActions;
     
     public String getObject() {
 	return object;
@@ -59,6 +63,20 @@ public class AgentStateResponse {
     public void setY(double y) {
         this.y = y;
     }
-    
-    
+
+    public AgentActionStateResponse getActiveAction() {
+        return activeAction;
+    }
+
+    public void setActiveAction(AgentActionStateResponse activeAction) {
+        this.activeAction = activeAction;
+    }
+
+    public List<AgentActionStateResponse> getQueuedActions() {
+        return queuedActions;
+    }
+
+    public void setQueuedActions(List<AgentActionStateResponse> queuedActions) {
+        this.queuedActions = queuedActions;
+    }
 }

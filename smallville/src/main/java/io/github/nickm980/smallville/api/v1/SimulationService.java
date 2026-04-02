@@ -884,7 +884,7 @@ public class SimulationService {
 	return Math.hypot(dx, dy) <= Math.max(1.0, radius);
     }
 
-    private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
+	private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
 	agent.applyStressChange(Math.min(0.25, event.severity * 0.02));
 	agent.setCurrentActivity("processing event");
 	agent.getMemoryStream().add(new Observation("Deterministic response: " + event.description));
@@ -903,6 +903,9 @@ public class SimulationService {
 	}
 
 	private void applyScheduledActivity(Agent agent) {
+		if (agent.hasPendingActions()) {
+			return;
+		}
 		Plan currentPlan = findCurrentPlan(agent);
 		if (currentPlan == null) {
 			return;
@@ -910,13 +913,26 @@ public class SimulationService {
 
 		String description = currentPlan.getDescription();
 		String activity = stripLeadingTime(description);
-		if (!activity.isBlank()) {
-			agent.setCurrentActivity(activity);
-		}
-
 		Location scheduledLocation = findMentionedLocation(description);
-		if (scheduledLocation != null) {
-			agent.setTargetLocation(scheduledLocation.getFullPath());
+		queuePlannedActions(agent, activity, scheduledLocation);
+	}
+
+	private void queuePlannedActions(Agent agent, String activity, Location scheduledLocation) {
+		List<AgentAction> actions = new ArrayList<>();
+		if (scheduledLocation != null && (agent.getLocation() == null
+				|| !scheduledLocation.getFullPath().equals(agent.getLocation().getFullPath()))) {
+			AgentAction move = new AgentAction("move", "Going to " + scheduledLocation.getFullPath());
+			move.setTargetLocation(scheduledLocation.getFullPath());
+			actions.add(move);
+		}
+		if (activity != null && !activity.isBlank()) {
+			AgentAction perform = new AgentAction("activity", activity);
+			perform.setTargetLocation(scheduledLocation == null ? null : scheduledLocation.getFullPath());
+			actions.add(perform);
+		}
+		if (!actions.isEmpty()) {
+			agent.replaceActionQueue(actions);
+			agent.setCurrentActivity(actions.getFirst().getDescription());
 		}
 	}
 
@@ -964,37 +980,63 @@ public class SimulationService {
 	}
 
 	private void advanceAgentMovement(Agent agent) {
-		// Skip movement on first turn after agent creation
-		if (!agent.hasBeenOrchestrated()) {
+		AgentAction activeAction = agent.getActiveAction();
+		if (activeAction == null) {
+			activeAction = agent.startNextAction();
+		}
+		if (activeAction == null) {
+			if (agent.hasBeenOrchestrated()) {
+				stepAgentRoutine(agent);
+			}
 			return;
 		}
 
-		Location targetLocation = resolveTargetLocation(agent);
-		if (targetLocation == null) {
-			stepAgentRoutine(agent);
+		if (activeAction.getEmoji() != null && !activeAction.getEmoji().isBlank()) {
+			agent.setCurrentEmoji(activeAction.getEmoji());
+		}
+		if (activeAction.getDescription() != null && !activeAction.getDescription().isBlank()) {
+			agent.setCurrentActivity(activeAction.getDescription());
+		}
+
+		String type = activeAction.getType() == null ? "activity" : activeAction.getType().toLowerCase();
+		if ("move".equals(type)) {
+			if (!agent.hasBeenOrchestrated()) {
+				return;
+			}
+			Location targetLocation = resolveTargetLocation(agent, activeAction);
+			if (targetLocation == null) {
+				agent.completeActiveAction();
+				return;
+			}
+			double targetX;
+			double targetY;
+			if (activeAction.getTargetX() != null && activeAction.getTargetY() != null) {
+				targetX = snapToTile(clamp(activeAction.getTargetX(), targetLocation.getMinX(), targetLocation.getMaxX()));
+				targetY = snapToTile(clamp(activeAction.getTargetY(), targetLocation.getMinY(), targetLocation.getMaxY()));
+			} else if (agent.getLocation() != null && targetLocation.getFullPath().equals(agent.getLocation().getFullPath())) {
+				targetX = snapToTile(targetLocation.getCenterX());
+				targetY = snapToTile(targetLocation.getCenterY());
+			} else {
+				targetX = snapToTile(clamp(agent.getX(), targetLocation.getMinX(), targetLocation.getMaxX()));
+				targetY = snapToTile(clamp(agent.getY(), targetLocation.getMinY(), targetLocation.getMaxY()));
+			}
+			boolean arrived = stepAgentToward(agent, targetX, targetY, targetLocation);
+			if (arrived) {
+				agent.completeActiveAction();
+			}
 			return;
 		}
 
-		double targetX;
-		double targetY;
-		if (agent.getLocation() != null && targetLocation.getFullPath().equals(agent.getLocation().getFullPath())) {
-			targetX = snapToTile(targetLocation.getCenterX());
-			targetY = snapToTile(targetLocation.getCenterY());
-		} else {
-			// Choose the nearest in-bounds tile as an "entrance" point into the destination location.
-			targetX = snapToTile(clamp(agent.getX(), targetLocation.getMinX(), targetLocation.getMaxX()));
-			targetY = snapToTile(clamp(agent.getY(), targetLocation.getMinY(), targetLocation.getMaxY()));
-		}
-
-		stepAgentToward(agent, targetX, targetY, targetLocation);
+		completeWorldAction(agent, activeAction);
 	}
 
-	private Location resolveTargetLocation(Agent agent) {
-		String targetName = agent.getTargetLocation();
+	private Location resolveTargetLocation(Agent agent, AgentAction action) {
+		String targetName = action.getTargetLocation();
 		if (targetName == null || targetName.isBlank()) {
 			return null;
 		}
 
+		agent.setTargetLocation(targetName);
 		Location target = world.getLocation(targetName).orElse(null);
 		if (target == null) {
 			agent.setTargetLocation(null);
@@ -1002,8 +1044,8 @@ public class SimulationService {
 		}
 
 		if (agent.getLocation() != null && agent.getLocation().getFullPath().equals(target.getFullPath())
-				&& toTile(agent.getX()) == toTile(target.getCenterX())
-				&& toTile(agent.getY()) == toTile(target.getCenterY())) {
+				&& toTile(agent.getX()) == toTile(action.getTargetX() == null ? target.getCenterX() : action.getTargetX())
+				&& toTile(agent.getY()) == toTile(action.getTargetY() == null ? target.getCenterY() : action.getTargetY())) {
 			agent.setTargetLocation(null);
 			return null;
 		}
@@ -1045,7 +1087,7 @@ public class SimulationService {
 		}
 	}
 
-	private void stepAgentToward(Agent agent, double targetX, double targetY, Location targetLocation) {
+	private boolean stepAgentToward(Agent agent, double targetX, double targetY, Location targetLocation) {
 		int currentTileX = toTile(agent.getX());
 		int currentTileY = toTile(agent.getY());
 		int targetTileX = toTile(targetX);
@@ -1058,7 +1100,7 @@ public class SimulationService {
 					agent.setTargetLocation(null);
 				}
 			}
-			return;
+			return true;
 		}
 
 		int dx = Integer.compare(targetTileX, currentTileX);
@@ -1089,10 +1131,29 @@ public class SimulationService {
 				if (locationAtNewPosition.getFullPath().equals(targetLocation.getFullPath())
 						&& toTile(nextX) == targetTileX && toTile(nextY) == targetTileY) {
 					agent.setTargetLocation(null);
+					return true;
 				}
 			}
-			return;
+			return false;
 		}
+		return false;
+	}
+
+	private void completeWorldAction(Agent agent, AgentAction action) {
+		String type = action.getType() == null ? "activity" : action.getType().toLowerCase();
+		if ("pickup".equals(type) && action.getItem() != null && agent instanceof Player player) {
+			player.addItem(action.getItem());
+		}
+		if ("drop".equals(type) && action.getItem() != null && agent instanceof Player player) {
+			player.removeItem(action.getItem());
+		}
+		if ("speak".equals(type) && action.getSpeakText() != null && !action.getSpeakText().isBlank()) {
+			agent.setCurrentActivity(action.getSpeakText());
+		}
+		if (action.getDescription() != null && !action.getDescription().isBlank()) {
+			agent.setCurrentActivity(action.getDescription());
+		}
+		agent.completeActiveAction();
 	}
 
 	private boolean isTileOccupiedByOtherAgent(double x, double y, Agent ignoreAgent) {
