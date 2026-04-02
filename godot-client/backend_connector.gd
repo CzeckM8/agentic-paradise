@@ -96,10 +96,10 @@ func _initialize_new_world():
 	"""Create initial agents and top-level locations with spatial bounds."""
 	var locations_config = {
 		"market": {"type": "market", "bounds": {"minX": 0, "maxX": 600, "minY": 0, "maxY": 500}},
-		"tavern": {"type": "tavern", "bounds": {"minX": 700, "maxX": 1200, "minY": 0, "maxY": 450}},
-		"coffee_shop": {"type": "cafe", "bounds": {"minX": 1300, "maxX": 1800, "minY": 0, "maxY": 400}},
-		"town_square": {"type": "public", "bounds": {"minX": 400, "maxX": 1100, "minY": 600, "maxY": 1200}},
-		"home": {"type": "residential", "bounds": {"minX": 80, "maxX": 350, "minY": 620, "maxY": 980}}
+		"tavern": {"type": "tavern", "bounds": {"minX": 900, "maxX": 1500, "minY": 0, "maxY": 500}},
+		"coffee_shop": {"type": "cafe", "bounds": {"minX": 1800, "maxX": 2400, "minY": 0, "maxY": 500}},
+		"town_square": {"type": "public", "bounds": {"minX": 1050, "maxX": 2050, "minY": 850, "maxY": 1450}},
+		"home": {"type": "residential", "bounds": {"minX": 150, "maxX": 750, "minY": 850, "maxY": 1450}}
 	}
 	
 	print("[INIT] Creating locations...")
@@ -826,10 +826,10 @@ func _load_and_initialize_state():
 	# Use the same configuration as _initialize_new_world()
 	var locations_config = {
 		"market": {"type": "market", "bounds": {"minX": 0, "maxX": 600, "minY": 0, "maxY": 500}},
-		"tavern": {"type": "tavern", "bounds": {"minX": 700, "maxX": 1200, "minY": 0, "maxY": 450}},
-		"coffee_shop": {"type": "cafe", "bounds": {"minX": 1300, "maxX": 1800, "minY": 0, "maxY": 400}},
-		"town_square": {"type": "public", "bounds": {"minX": 400, "maxX": 1100, "minY": 600, "maxY": 1200}},
-		"home": {"type": "residential", "bounds": {"minX": 80, "maxX": 350, "minY": 620, "maxY": 980}}
+		"tavern": {"type": "tavern", "bounds": {"minX": 900, "maxX": 1500, "minY": 0, "maxY": 500}},
+		"coffee_shop": {"type": "cafe", "bounds": {"minX": 1800, "maxX": 2400, "minY": 0, "maxY": 500}},
+		"town_square": {"type": "public", "bounds": {"minX": 1050, "maxX": 2050, "minY": 850, "maxY": 1450}},
+		"home": {"type": "residential", "bounds": {"minX": 150, "maxX": 750, "minY": 850, "maxY": 1450}}
 	}
 	
 	print("[LOAD] Recreating locations...")
