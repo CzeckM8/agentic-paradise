@@ -97,6 +97,26 @@ plans:
     Today is Wednesday February 13. Here is {{agent.name}}'s
     plan today in broad strokes:
 
+  dailyCommitments: |
+    {{world.description}}
+    {{agent.summary}}
+    Relevant Memories: {{#memories.relevant}}{{description}}; {{/memories.relevant}}
+
+    Generate 2 to 4 daily commitments for {{agent.name}} that fit their personality, traits, and available locations.
+    Rules:
+    - Only use location names that appear EXACTLY in "Available Locations" above
+    - Times must be in 24-hour format HH:MM (e.g. 09:00, 14:30)
+    - Each commitment must have a start, end, location, goal, and priority
+    - The goal must be the activity to do after arriving there, not the travel itself
+    - Do not write goals like "go to tavern" or "travel to market"
+    - goals must be concise (under 10 words)
+    - priority must be one of: high, medium, low
+
+    Respond ONLY with valid JSON. No explanation, no markdown fences. Example format:
+    {"commitments":[{"start":"09:00","end":"10:30","location":"EXACT_LOCATION_NAME","goal":"brief activity description","priority":"medium"}]}
+
+    Today is {{date.full}}. Generate {{agent.name}}'s commitments:
+
   current: |
     {{world.description}}
     Schedule: {{#agent.shortPlans}}{{description}}; {{/agent.shortPlans}}

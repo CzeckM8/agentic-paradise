@@ -6,6 +6,9 @@ import java.util.stream.Collectors;
 import io.github.nickm980.smallville.World;
 import io.github.nickm980.smallville.entities.Agent;
 import io.github.nickm980.smallville.entities.Conversation;
+import io.github.nickm980.smallville.entities.SimulationTime;
+import io.github.nickm980.smallville.memory.Commitment;
+import io.github.nickm980.smallville.memory.CommitmentStatus;
 import io.github.nickm980.smallville.memory.Observation;
 import io.github.nickm980.smallville.memory.Plan;
 import io.github.nickm980.smallville.memory.PlanType;
@@ -31,8 +34,10 @@ public class UpdatePlans extends AgentUpdate {
 	if (observation != null && !observation.isEmpty()) {
 	    LOG.info("starting reaction to an observation");
 	    Reaction reaction = converter.shouldUpdatePlans(agent, observation);
-	    shouldUpdatePlans = reaction.getAnswer().toLowerCase().contains("yes");
-	    info.setShouldUpdateConversation(reaction.getConversation().toLowerCase().contains("yes"));
+	    String answer = reaction != null && reaction.getAnswer() != null ? reaction.getAnswer() : "";
+	    String conversation = reaction != null && reaction.getConversation() != null ? reaction.getConversation() : "";
+	    shouldUpdatePlans = answer.toLowerCase().contains("yes");
+	    info.setShouldUpdateConversation(conversation.toLowerCase().contains("yes"));
 	}
 
 	if (shouldUpdatePlans) {
@@ -49,6 +54,20 @@ public class UpdatePlans extends AgentUpdate {
 	
 	if (agent.getMemoryStream().getPlans(PlanType.SHORT_TERM).isEmpty()) {
 	    updatePlans(converter, agent, PlanType.SHORT_TERM);
+	}
+
+	// Generate commitment-based daily schedule when there are no active/pending
+	// commitments left (day start, first run) or when plans just got replanned.
+	boolean hasActiveCommitments = agent.getMemoryStream().getPlans(PlanType.COMMITMENT).stream()
+	    .filter(p -> p instanceof Commitment)
+	    .map(p -> (Commitment) p)
+	    .anyMatch(c -> c.getStatus() != CommitmentStatus.COMPLETED && !c.isExpired(SimulationTime.now()));
+
+	if (!hasActiveCommitments || shouldUpdatePlans) {
+	    agent.getMemoryStream().prunePlans(PlanType.COMMITMENT);
+	    List<Commitment> commitments = converter.getCommitments(agent);
+	    agent.getMemoryStream().addAll(commitments);
+	    LOG.info("[Plans] Generated {} commitments for {}", commitments.size(), agent.getFullName());
 	}
 
 	LOG.info("[Plans] Plans updated");

@@ -13,6 +13,13 @@ public class Agent {
     private Location location;
     private String targetLocation;
     private String traits;
+    private double aggression;
+    private double fearfulness;
+    private double loyalty;
+    private double impulsivity;
+    private double compassion;
+    private double riskTolerance;
+    private double socialDominance;
     private double x = 0.0;
     private double y = 0.0;
     private boolean hasBeenOrchestrated = false; // Prevents movement on first turn after creation
@@ -23,11 +30,29 @@ public class Agent {
 	this.memories.addAll(characteristics);
 	this.location = location;
 	this.currentAction = new ActionHistory(currentAction);
+    initializeTemperament(name);
 	// Initialize to center of location
 	if (location != null) {
 	    this.x = location.getCenterX();
 	    this.y = location.getCenterY();
 	}
+    }
+
+    private void initializeTemperament(String seedName) {
+    int seed = Math.abs(seedName.hashCode());
+    this.aggression = scaledTrait(seed, 0);
+    this.fearfulness = scaledTrait(seed, 1);
+    this.loyalty = scaledTrait(seed, 2);
+    this.impulsivity = scaledTrait(seed, 3);
+    this.compassion = scaledTrait(seed, 4);
+    this.riskTolerance = scaledTrait(seed, 5);
+    this.socialDominance = scaledTrait(seed, 6);
+    }
+
+    private double scaledTrait(int seed, int salt) {
+    int shifted = (seed >> (salt * 3)) ^ (seed << (salt + 1));
+    int normalized = Math.abs(shifted % 101);
+    return normalized / 100.0;
     }
 
     public String getFullName() {
@@ -84,6 +109,34 @@ public class Agent {
 
     public String getTraits() {
 	return traits;
+    }
+
+    public double getAggression() {
+	return aggression;
+    }
+
+    public double getFearfulness() {
+	return fearfulness;
+    }
+
+    public double getLoyalty() {
+	return loyalty;
+    }
+
+    public double getImpulsivity() {
+	return impulsivity;
+    }
+
+    public double getCompassion() {
+	return compassion;
+    }
+
+    public double getRiskTolerance() {
+	return riskTolerance;
+    }
+
+    public double getSocialDominance() {
+	return socialDominance;
     }
     
     public double getStressLevel() {

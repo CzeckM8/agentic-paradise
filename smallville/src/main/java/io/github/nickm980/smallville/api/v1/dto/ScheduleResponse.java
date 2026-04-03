@@ -5,7 +5,7 @@ import java.time.LocalDateTime;
 public class ScheduleResponse {
     private String description;
     private LocalDateTime time;
-    private String type; // SHORT_TERM, MID_TERM, LONG_TERM
+    private String type; // SHORT_TERM, MID_TERM, LONG_TERM, COMMITMENT
 
     public ScheduleResponse(String description, LocalDateTime time, String type) {
         this.description = description;

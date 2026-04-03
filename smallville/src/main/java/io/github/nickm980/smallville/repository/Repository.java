@@ -1,9 +1,9 @@
 package io.github.nickm980.smallville.repository;
 
 import java.time.LocalDateTime;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -15,7 +15,7 @@ public class Repository<T> {
     public Map<String, RepositoryItem<T>> data;
 
     public Repository() {
-	data = new HashMap<String, RepositoryItem<T>>();
+	data = new ConcurrentHashMap<String, RepositoryItem<T>>();
     }
 
     /**
@@ -83,5 +83,9 @@ public class Repository<T> {
      */
     public List<T> all() {
 	return data.values().stream().map(t -> t.getData()).collect(Collectors.toList());
+    }
+
+    public boolean delete(String id) {
+        return data.remove(id) != null;
     }
 }

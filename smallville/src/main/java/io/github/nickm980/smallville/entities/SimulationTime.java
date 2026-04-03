@@ -9,9 +9,9 @@ import io.github.nickm980.smallville.exceptions.SmallvilleException;
 
 
 public final class SimulationTime {
-    private static final LocalDateTime START = LocalDateTime.now();
+    private static final LocalDateTime START = LocalDateTime.now().withHour(12).withMinute(0).withSecond(0).withNano(0);
 
-    private static volatile LocalDateTime time = LocalDateTime.now();
+    private static volatile LocalDateTime time = START;
     private static volatile Duration step = Duration.ofMinutes(1);
 
     public static synchronized LocalDateTime now() { return time; }

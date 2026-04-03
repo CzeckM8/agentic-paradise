@@ -10,6 +10,8 @@ public class PlayerActionResponse {
     private List<AgentStateResponse> affectedAgents;  // Other agents affected by action
     private String result;  // Description of what happened
     private double stressChange;  // How much player stress changed
+    private String agentReplySpeaker;
+    private String agentReplyText;
 
     public PlayerActionResponse(boolean success, String result) {
         this.success = success;
@@ -70,5 +72,21 @@ public class PlayerActionResponse {
 
     public void setStressChange(double stressChange) {
         this.stressChange = stressChange;
+    }
+
+    public String getAgentReplySpeaker() {
+        return agentReplySpeaker;
+    }
+
+    public void setAgentReplySpeaker(String agentReplySpeaker) {
+        this.agentReplySpeaker = agentReplySpeaker;
+    }
+
+    public String getAgentReplyText() {
+        return agentReplyText;
+    }
+
+    public void setAgentReplyText(String agentReplyText) {
+        this.agentReplyText = agentReplyText;
     }
 }

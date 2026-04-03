@@ -11,17 +11,22 @@ public class AgentDeltaStateResponse {
     private String emoji;
     private double stressLevel;
     private String mentalState;
+    private double x;
+    private double y;
 
     public AgentDeltaStateResponse() {}
 
     public AgentDeltaStateResponse(String name, String location, String currentAction, 
-                                   String emoji, double stressLevel, String mentalState) {
+                                   String emoji, double stressLevel, String mentalState,
+                                   double x, double y) {
         this.name = name;
         this.location = location;
         this.currentAction = currentAction;
         this.emoji = emoji;
         this.stressLevel = stressLevel;
         this.mentalState = mentalState;
+        this.x = x;
+        this.y = y;
     }
 
     public String getName() {
@@ -70,5 +75,21 @@ public class AgentDeltaStateResponse {
 
     public void setMentalState(String mentalState) {
         this.mentalState = mentalState;
+    }
+
+    public double getX() {
+        return x;
+    }
+
+    public void setX(double x) {
+        this.x = x;
+    }
+
+    public double getY() {
+        return y;
+    }
+
+    public void setY(double y) {
+        this.y = y;
     }
 }

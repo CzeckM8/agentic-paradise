@@ -5,6 +5,21 @@ public class RuntimeOrchestrationRequest {
     private Double playerY;
     private double awarenessRadius = 180.0;
     private boolean forceDayStart = false;
+    private java.util.List<String> pinnedAgents = new java.util.ArrayList<>();
+
+    public java.util.List<String> getPinnedAgents() {
+        return pinnedAgents;
+    }
+
+    public void addPinnedAgent(String agentName) {
+        if (agentName != null && !agentName.isBlank()) {
+            pinnedAgents.add(agentName);
+        }
+    }
+
+    public boolean isPinned(String agentName) {
+        return pinnedAgents != null && pinnedAgents.contains(agentName);
+    }
 
     public Double getPlayerX() {
         return playerX;

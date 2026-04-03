@@ -3,6 +3,7 @@ package io.github.nickm980.smallville.prompts;
 import java.util.List;
 
 import io.github.nickm980.smallville.entities.Agent;
+import io.github.nickm980.smallville.memory.Commitment;
 import io.github.nickm980.smallville.entities.Conversation;
 import io.github.nickm980.smallville.entities.Dialog;
 import io.github.nickm980.smallville.memory.Plan;
@@ -113,4 +114,14 @@ public interface Prompts {
     Reaction shouldUpdatePlans(Agent agent, String observation);
 
     Dialog saySomething(Agent agent, String observation);
+
+    /**
+     * Generates 2-4 structured daily commitments for an agent from a JSON LLM
+     * response. Each commitment has an explicit map location, time window, goal,
+     * and priority, replacing the fragile full-schedule text approach.
+     *
+     * @param agent The agent to generate commitments for.
+     * @return A list of Commitment objects ordered by start time.
+     */
+    List<Commitment> getCommitments(Agent agent);
 }

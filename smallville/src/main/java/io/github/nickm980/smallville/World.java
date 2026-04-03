@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import io.github.nickm980.smallville.entities.Agent;
 import io.github.nickm980.smallville.entities.Conversation;
 import io.github.nickm980.smallville.entities.Location;
+import io.github.nickm980.smallville.entities.Player;
 import io.github.nickm980.smallville.exceptions.SmallvilleException;
 import io.github.nickm980.smallville.repository.Repository;
 
@@ -63,6 +64,16 @@ public class World {
 
     public Optional<Agent> getAgent(String name) {
 	return Optional.ofNullable(agents.getById(name));
+    }
+
+    public int removeNonPlayerAgents() {
+        List<Agent> toRemove = agents.all().stream()
+            .filter(agent -> !(agent instanceof Player))
+            .collect(java.util.stream.Collectors.toList());
+        for (Agent agent : toRemove) {
+            agents.delete(agent.getFullName());
+        }
+        return toRemove.size();
     }
 
     public List<Conversation> getConversationsAfter(LocalDateTime time) {

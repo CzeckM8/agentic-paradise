@@ -27,6 +27,13 @@ public class ChatGPT implements LLM {
     private final static Logger LOG = LoggerFactory.getLogger(ChatGPT.class);
     private final static ObjectMapper MAPPER = new ObjectMapper();
     private final EventBus events = EventBus.getEventBus();
+
+	private static final String OLLAMA_URL = "http://localhost:11434/v1/chat/completions";
+	private static final String OLLAMA_EMBEDDINGS_URL = "http://localhost:11434/v1/embeddings";
+	private static final String OLLAMA_AUTH = "Bearer ollama";
+	private static final String OLLAMA_MODEL = "llama3.1:8b-instruct-q4_K_M";
+	private static final String GOOGLE_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+	private static final String GOOGLE_MODEL = "gemini-2.0-flash";
     
     @Override
     public String sendChat(PromptRequest prompt, double temperature) {
@@ -68,6 +75,11 @@ public class ChatGPT implements LLM {
     
     @Override
     public float[] getTokenEmbeddings(String text) {
+	if (isGoogleProvider()) {
+	    LOG.warn("Embeddings are not configured for google_ai provider; returning empty embedding vector.");
+	    return new float[0];
+	}
+
 	OkHttpClient client = new OkHttpClient();
 	ObjectMapper mapper = new ObjectMapper();
 	float[] result = new float[0];
@@ -77,9 +89,9 @@ public class ChatGPT implements LLM {
 	    JsonNode requestBody = mapper.createObjectNode().put("model", "nomic-embed-text").put("input", text);
 
 	    Request request = new Request.Builder()
-		.url("http://localhost:11434/v1/embeddings")
+		.url(OLLAMA_EMBEDDINGS_URL)
 		.post(RequestBody.create(mapper.writeValueAsString(requestBody), okhttp3.MediaType.parse("application/json")))
-		.addHeader("Authorization", "Bearer ollama")
+		.addHeader("Authorization", OLLAMA_AUTH)
 		.build();
 
 	    Response response = client.newCall(request).execute();
@@ -131,16 +143,19 @@ public class ChatGPT implements LLM {
 
 	json = json.replace("%messages", MAPPER.writeValueAsString(prompt.build()));
 	json = json.replace("%temperature", String.valueOf(temperature));
-	json = json.replace("%model", "llama3.1:8b-instruct-q4_K_M");
+	json = json.replace("%model", getChatModel());
 
 	LOG.debug("[Chat Request Original]" + json);
 	LOG.debug("[Chat Request]" + prompt.getContent());
 
+	String apiUrl = getChatCompletionsUrl();
+	String authHeader = getAuthorizationHeader();
+
 	RequestBody body = RequestBody.create(json.getBytes(), okhttp3.MediaType.parse("application/json"));
 	Request request = new Request.Builder()
-	    .url("http://localhost:11434/v1/chat/completions")
+	    .url(apiUrl)
 	    .addHeader("Content-Type", "application/json")
-	    .addHeader("Authorization", "Bearer ollama")
+	    .addHeader("Authorization", authHeader)
 	    .post(body)
 	    .build();
 
@@ -149,6 +164,9 @@ public class ChatGPT implements LLM {
 	Response response = client.newCall(request).execute();
 	String responseBody = response.body().string();
 	LOG.info("Raw LLM Response: " + responseBody);
+	if (!response.isSuccessful()) {
+	    throw new SmallvilleException("LLM request failed with status " + response.code() + ": " + responseBody);
+	}
 
 	ObjectMapper objectMapper = new ObjectMapper();
 	JsonNode node = objectMapper.readTree(responseBody);
@@ -176,5 +194,33 @@ public class ChatGPT implements LLM {
 	events.postEvent(promptReceievedEvent);
 	
 	return promptReceievedEvent.getResult();
+    }
+
+    private boolean isGoogleProvider() {
+	String provider = System.getProperty("llm.provider", "");
+	return "google_ai".equalsIgnoreCase(provider);
+    }
+
+    private String getChatCompletionsUrl() {
+	return isGoogleProvider() ? GOOGLE_OPENAI_URL : OLLAMA_URL;
+    }
+
+    private String getChatModel() {
+	String overrideModel = System.getProperty("llm.model");
+	if (overrideModel != null && !overrideModel.isBlank()) {
+	    return overrideModel;
+	}
+	return isGoogleProvider() ? GOOGLE_MODEL : OLLAMA_MODEL;
+    }
+
+    private String getAuthorizationHeader() {
+	if (isGoogleProvider()) {
+	    String key = System.getProperty("googleai.api.key", "");
+	    if (key.isBlank()) {
+		throw new SmallvilleException("google_ai provider requires -Dgoogleai.api.key");
+	    }
+	    return "Bearer " + key;
+	}
+	return OLLAMA_AUTH;
     }
 }

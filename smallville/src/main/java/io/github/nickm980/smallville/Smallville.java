@@ -63,7 +63,7 @@ public class Smallville {
 
         Analytics analytics = new Analytics();
         eventBus.registerListener(new AnalyticsListener(analytics));
-        
+
 	new SmallvilleServer(analytics, new ChatGPT(), new World()).start(port);
     }
 }

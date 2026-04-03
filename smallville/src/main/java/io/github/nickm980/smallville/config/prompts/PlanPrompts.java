@@ -5,6 +5,7 @@ public class PlanPrompts {
     private String shortTerm;
     private String longTerm;
     private String current;
+    private String dailyCommitments;
 
     public String getShortTerm() {
 	return shortTerm;
@@ -28,5 +29,13 @@ public class PlanPrompts {
 
     public void setCurrent(String current) {
 	this.current = current;
+    }
+
+    public String getDailyCommitments() {
+	return dailyCommitments;
+    }
+
+    public void setDailyCommitments(String dailyCommitments) {
+	this.dailyCommitments = dailyCommitments;
     }
 }

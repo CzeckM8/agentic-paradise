@@ -62,6 +62,25 @@ public class UpdateService {
 	LOG.info("Agent updated");
     }
 
+    public void refreshAgentForNewDay(Agent agent) {
+	LOG.info("Starting new-day refresh for {} at {}", agent.getFullName(),
+	    SimulationTime.now().format(DateTimeFormatter.ofPattern(SmallvilleConfig.getConfig().getTimeFormat())));
+	Location oldLocation = agent.getLocation();
+	AgentUpdate update = new UpdateMemoryWeights()
+	    .setNext(new UpdatePlans())
+	    .setNext(new UpdateCurrentActivity())
+	    .setNext(new UpdateConversation());
+	update.start(chatService, world, agent, new UpdateInfo());
+	events.postEvent(new AgentUpdateEvent(agent, oldLocation, agent.getLocation()));
+	LOG.info("New-day refresh completed for {}", agent.getFullName());
+    }
+
+    public void runEndOfDayReflection(Agent agent) {
+	LOG.info("Running end-of-day reflection for {}", agent.getFullName());
+	AgentUpdate update = new UpdateReflection();
+	update.start(chatService, world, agent, new UpdateInfo());
+    }
+
     public void react(Agent agent, String observation) {
 	LOG.info("Starting reaction for " + agent.getFullName());
 
@@ -93,6 +112,10 @@ public class UpdateService {
     public String ask(Agent agent, String question) {
 	return chatService.ask(agent, question);
     }
+
+	public String sendRawPrompt(String prompt, double temperature) {
+		return chatService.sendRawPrompt(prompt, temperature);
+	}
 
 	public void updateCurrentActivity(Agent agent) {
 	chatService.updateCurrentActivity(agent);
