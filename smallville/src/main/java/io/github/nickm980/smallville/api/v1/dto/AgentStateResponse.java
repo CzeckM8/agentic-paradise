@@ -12,11 +12,14 @@ public class AgentStateResponse {
     private double y;
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
     private String targetLocation;
 
 =======
 =======
 >>>>>>> 09822c1 (Add queued action system for agents)
+=======
+>>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
     private AgentActionStateResponse activeAction;
     private List<AgentActionStateResponse> queuedActions;
     
@@ -74,6 +77,7 @@ public class AgentStateResponse {
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
     public String getTargetLocation() {
         return targetLocation;
     }
@@ -83,6 +87,8 @@ public class AgentStateResponse {
 =======
 =======
 >>>>>>> 09822c1 (Add queued action system for agents)
+=======
+>>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
     public AgentActionStateResponse getActiveAction() {
         return activeAction;
     }
@@ -98,9 +104,12 @@ public class AgentStateResponse {
     public void setQueuedActions(List<AgentActionStateResponse> queuedActions) {
         this.queuedActions = queuedActions;
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> 09822c1 (Add queued action system for agents)
 =======
 >>>>>>> 09822c1 (Add queued action system for agents)
+=======
+>>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
     }
 }
 
