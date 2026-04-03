@@ -13,16 +13,46 @@ var target_object_id = ""  # Optional in-location anchor, e.g. coffee_register
 var target_position = Vector2.ZERO
 var has_initial_position = false
 var _idle_turn_count: int = 0  # counts idle steps; prevents direction oscillation
+var speech_label: Label = null
+var _speech_timer: float = 0.0
 
 func _ready():
 	# Default appearance: diamond marker with white outline.
 	sprite.texture = _create_diamond_texture()
-	label.position = Vector2(-40, -40)
+	sprite.position = Vector2(16, 16)  # Draw in the center of the logical tile
+	label.position = Vector2(-24, -52)
 	label.add_theme_font_size_override("font_size", 12)
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	label.custom_minimum_size = Vector2(180, 0)
 	target_position = position
 
-func _process(_delta):
-	pass  # Position is set directly on each turn — no per-frame lerp
+	# Speech bubble label — styled panel above the name label
+	speech_label = Label.new()
+	speech_label.name = "SpeechLabel"
+	speech_label.position = Vector2(-44, -106)
+	speech_label.add_theme_font_size_override("font_size", 10)
+	speech_label.add_theme_color_override("font_color", Color.WHITE)
+	speech_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	speech_label.custom_minimum_size = Vector2(120, 0)
+	var bg = StyleBoxFlat.new()
+	bg.bg_color = Color(0.07, 0.07, 0.07, 0.80)
+	bg.content_margin_left = 5
+	bg.content_margin_right = 5
+	bg.content_margin_top = 3
+	bg.content_margin_bottom = 3
+	bg.corner_radius_top_left = 4
+	bg.corner_radius_top_right = 4
+	bg.corner_radius_bottom_left = 4
+	bg.corner_radius_bottom_right = 4
+	speech_label.add_theme_stylebox_override("normal", bg)
+	speech_label.visible = false
+	add_child(speech_label)
+
+func _process(delta):
+	if _speech_timer > 0.0:
+		_speech_timer -= delta
+		if _speech_timer <= 0.0 and speech_label != null:
+			speech_label.visible = false
 
 func update_from_backend(data, location_map, preset_position: Vector2 = Vector2.ZERO):
 	"""Update agent based on backend data.
@@ -56,14 +86,25 @@ func update_from_backend(data, location_map, preset_position: Vector2 = Vector2.
 	_update_label()
 	_update_appearance()
 
+func show_speech(text: String, duration: float = 6.0) -> void:
+	"""Show a floating speech bubble above this agent for `duration` seconds."""
+	if speech_label == null:
+		return
+	var display = text.strip_edges()
+	if display.length() > 140:
+		display = display.substr(0, 137) + "..."
+	speech_label.text = display
+	speech_label.visible = true
+	_speech_timer = duration
+
 func _update_label():
 	"""Update the text label above the agent"""
 	var display_text = agent_name
 	
-	# Truncate long activities
+	# Keep long activities visible without flooding the label.
 	var activity_display = current_activity
-	if activity_display.length() > 30:
-		activity_display = activity_display.substr(0, 27) + "..."
+	if activity_display.length() > 70:
+		activity_display = activity_display.substr(0, 67) + "..."
 	
 	label.text = "%s\n%s\n@ %s" % [agent_name, activity_display, current_location]
 
@@ -116,6 +157,9 @@ func step_client_side(bc: Node) -> void:
 	if not has_initial_position:
 		return
 	current_location = bc.get_location_name_for_position(position, current_location)
+	if _is_dialogue_locked_activity():
+		_update_label()
+		return
 
 	var waypoint = _compute_waypoint(bc)
 	if waypoint == Vector2.ZERO:
@@ -132,8 +176,25 @@ func step_client_side(bc: Node) -> void:
 	current_location = bc.get_location_name_for_position(position, current_location)
 	_update_label()
 
+func _is_dialogue_locked_activity() -> bool:
+	var activity_lower = current_activity.to_lower()
+	return activity_lower.contains("agentic: speaking") \
+		or activity_lower.contains("talking with") \
+		or activity_lower.contains("engaged in conversation") \
+		or activity_lower.contains("conversation declined") \
+		or activity_lower.contains("deferred conversation")
+
 func _compute_waypoint(bc: Node) -> Vector2:
 	"""Return the coordinate this NPC should step toward this turn."""
+	# During agentic movement, track the target entity's live position via entity anchor.
+	# The target name is embedded in the activity string: "agentic: moving toward <Name> ..."
+	if _is_agentic_approach_activity() and bc.has_method("get_entity_anchor"):
+		var target_name = _extract_agentic_movement_target()
+		if target_name != "":
+			var anchor_pos = bc.get_entity_anchor(target_name)
+			if anchor_pos != Vector2.ZERO:
+				return bc.snap_to_tile(anchor_pos)
+
 	var safe_object_id = "" if target_object_id == null else str(target_object_id)
 	if safe_object_id != "":
 		var target_obj = _find_world_object_by_id(bc, safe_object_id)
@@ -180,18 +241,54 @@ func _compute_waypoint(bc: Node) -> Vector2:
 	if nearest_anchor != Vector2.ZERO:
 		var interior = _interior_door_target(bc, nearest_anchor, loc_data)
 		if position.distance_to(interior) <= bc.get_tile_size() * 1.0:
-			return center
+			var at_loc = bc.get_location_name_for_position(position, "")
+			if at_loc == target_location:
+				return center
 		return interior
 
-	# No anchor — clamp to nearest point inside target bounds
+	# No anchor — choose an interior waypoint (not edge/border) to avoid
+	# floor/snap mismatch that can stick goals just outside large open areas.
+	var ts = bc.get_tile_size()
 	var min_x = float(loc_data.get("minX", 0.0))
 	var max_x = float(loc_data.get("maxX", 0.0))
 	var min_y = float(loc_data.get("minY", 0.0))
 	var max_y = float(loc_data.get("maxY", 0.0))
-	return Vector2(
-		clamp(position.x, min_x, max_x),
-		clamp(position.y, min_y, max_y)
+	var interior_min_x = min_x + ts
+	var interior_max_x = max_x - ts
+	var interior_min_y = min_y + ts
+	var interior_max_y = max_y - ts
+	# Handle very narrow locations safely.
+	if interior_min_x > interior_max_x:
+		interior_min_x = min_x
+		interior_max_x = max_x
+	if interior_min_y > interior_max_y:
+		interior_min_y = min_y
+		interior_max_y = max_y
+	var clamped = Vector2(
+		clamp(position.x, interior_min_x, interior_max_x),
+		clamp(position.y, interior_min_y, interior_max_y)
 	)
+	return bc.snap_to_tile(clamped)
+
+func _is_agentic_approach_activity() -> bool:
+	return current_activity.to_lower().contains("agentic: moving toward")
+
+func _extract_agentic_movement_target() -> String:
+	"""Parse the entity name out of an activity string like:
+	   'agentic: moving toward Player'
+	   'agentic: moving toward Player to discuss <topic>'
+	Returns empty string if the format is not matched."""
+	var lower = current_activity.to_lower()
+	var prefix = "agentic: moving toward "
+	var idx = lower.find(prefix)
+	if idx < 0:
+		return ""
+	var rest = current_activity.substr(idx + prefix.length())
+	# Entity name ends at " to " qualifier or end-of-string
+	var to_idx = rest.to_lower().find(" to ")
+	if to_idx >= 0:
+		return rest.substr(0, to_idx).strip_edges()
+	return rest.strip_edges()
 
 func _find_world_object_by_id(bc: Node, object_id) -> Dictionary:
 	if object_id == null:

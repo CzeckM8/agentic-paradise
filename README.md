@@ -13,9 +13,6 @@ Based on: [nmater1/smallville](https://github.com/nmater1/smallville) (Apache 2.
 mvn clean package
 java -jar target/smallville-1.3.0.jar --port 8080
 
-If the server requires an API key in your local config, run:
-`java -jar target/smallville-1.3.0.jar --api-key o --port 8080`
-
 .env file with the following param:
 GOOGLE_AI_API_KEY=YOUR-API-KEY
 LLM_PROVIDER=google_ai

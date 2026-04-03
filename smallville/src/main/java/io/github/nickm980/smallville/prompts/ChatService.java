@@ -133,7 +133,11 @@ public class ChatService implements Prompts {
 
 	LocalNLP nlp = new LocalNLP();
 	CurrentActivity activity = Util.parseAsClass(response, CurrentActivity.class);
-	LOG.info(activity.getActivity() + activity.getLocation());
+	if (activity == null) {
+		activity = new CurrentActivity();
+	}
+	activity.setActivity(sanitizeActivityText(activity.getActivity()));
+	LOG.info("[Activity] {}", activity.getActivity());
 	activity.setLastActivity(nlp.convertToPastTense(agent.getCurrentActivity()));
 
 	return activity;
@@ -364,7 +368,7 @@ public class ChatService implements Prompts {
     @Override
     public void updateCurrentActivity(Agent agent) {
 	CurrentActivity activity = getCurrentActivity(agent);
-	agent.setCurrentActivity(activity.getActivity());
+	agent.setCurrentActivity(sanitizeActivityText(activity.getActivity()));
 	agent.setCurrentEmoji(activity.getEmoji());
 
 	String desiredLocation = activity.getLocation();
@@ -377,6 +381,29 @@ public class ChatService implements Prompts {
 	    }, () -> LOG.debug("Location not found for activity: {}", desiredLocation));
 	}
     }
+
+	private String sanitizeActivityText(String raw) {
+		if (raw == null) {
+			return "";
+		}
+		String cleaned = raw.replace("\r", " ").replace("\n", " ").trim();
+		cleaned = cleaned.replace("```json", " ").replace("```", " ");
+		cleaned = cleaned.replace("**", " ").replace("__", " ").replace("`", " ");
+		cleaned = cleaned.replaceAll("(?i)^\\s*[*_`#>]+\\s*", "");
+		cleaned = cleaned.replaceAll("(?i)^\\s*activity\\s*:\\s*", "");
+		cleaned = cleaned.replaceAll("(?i)^\\s*[A-Za-z][A-Za-z'\\- ]+\\s+plan\\s*\\([^)]*\\)\\s*:\\s*", "");
+		cleaned = cleaned.replaceAll("(?i)^\\s*\\d{1,2}:\\d{2}\\s*[AaPp][Mm]\\s*(?:[-–—]|to)?\\s*\\d{1,2}:\\d{2}\\s*[AaPp][Mm]\\s*[:\\-]*\\s*", "");
+		cleaned = cleaned.replaceAll("^\\s*[-*•]+\\s*", "");
+		cleaned = cleaned.replaceAll("^\\s*\\d+\\s*[.)-:]\\s*", "");
+		cleaned = cleaned.replaceAll("(?i)\\s*location\\s*:\\s*[^.?!;]+", "");
+		cleaned = cleaned.replaceAll("(?i)\\s*emoji\\s*:\\s*[^.?!;]+", "");
+		cleaned = cleaned.replaceAll("^\\s*[:*\\-]+\\s*", "");
+		cleaned = cleaned.replaceAll("\\s+", " ").trim();
+		if (cleaned.length() > 140) {
+			cleaned = cleaned.substring(0, 137).trim() + "...";
+		}
+		return cleaned;
+	}
 
     @Override
     public List<Commitment> getCommitments(Agent agent) {

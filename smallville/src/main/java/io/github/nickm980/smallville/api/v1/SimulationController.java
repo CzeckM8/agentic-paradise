@@ -103,6 +103,11 @@ public final class SimulationController {
 	ctx.json(res);
     }
 
+	@Get("/agents/{name}/position")
+	public void getAgentPosition(Context ctx, @Param("name") String name) {
+		ctx.json(service.getAgentPositionSnapshot(name));
+	}
+
 	@Get("/agents/{name}/memories/summary")
 	public void getAgentMemorySummary(Context ctx, @Param("name") String name) {
 	ctx.json(service.getAgentMemorySummary(name));
@@ -253,6 +258,57 @@ public final class SimulationController {
 	ctx.json(Map.of("actions", service.getPlayerActionHistory(name, limit)));
     }
 
+	@Get("/player/{name}/affordances")
+	public void getPlayerAffordances(Context ctx, @Param("name") String name) {
+		String rawX = ctx.queryParam("x");
+		String rawY = ctx.queryParam("y");
+		if (rawX == null || rawY == null) {
+			ctx.status(400).json(Map.of("success", false, "error", "x and y query params are required"));
+			return;
+		}
+		try {
+			double x = Double.parseDouble(rawX);
+			double y = Double.parseDouble(rawY);
+			double radius = 4.0;
+			String rawRadius = ctx.queryParam("radius");
+			if (rawRadius != null && !rawRadius.isBlank()) {
+				radius = Double.parseDouble(rawRadius);
+			}
+			ctx.json(service.getInteractionAffordances(name, x, y, radius));
+		} catch (NumberFormatException e) {
+			ctx.status(400).json(Map.of("success", false, "error", "x, y, and radius must be numeric"));
+		}
+	}
+
+	@Get("/player/{name}/affordances/at")
+	public void getPlayerAffordancesAtCoordinate(Context ctx, @Param("name") String name) {
+		String rawX = ctx.queryParam("x");
+		String rawY = ctx.queryParam("y");
+		if (rawX == null || rawY == null) {
+			ctx.status(400).json(Map.of("success", false, "error", "x and y query params are required"));
+			return;
+		}
+		try {
+			double x = Double.parseDouble(rawX);
+			double y = Double.parseDouble(rawY);
+			ctx.json(service.getInteractionAffordancesAtCoordinate(name, x, y));
+		} catch (NumberFormatException e) {
+			ctx.status(400).json(Map.of("success", false, "error", "x and y must be numeric"));
+		}
+	}
+
+	@Get("/conversations/history")
+	public void getConversationHistory(Context ctx) {
+		String a = ctx.queryParam("a");
+		String b = ctx.queryParam("b");
+		if (a == null || b == null || a.isBlank() || b.isBlank()) {
+			ctx.status(400).json(Map.of("success", false, "error", "query params a and b are required"));
+			return;
+		}
+		int limit = parseLimit(ctx, 20);
+		ctx.json(service.getConversationTranscript(a, b, limit));
+	}
+
     @Post("/locations/{name}")
     public void changeLocationState(Context ctx) throws JsonMappingException, JsonProcessingException {
 	String location = ctx.pathParam("name");
@@ -323,6 +379,11 @@ public final class SimulationController {
 	@Get("/objects/{id}")
 	public void getObjectInstance(Context ctx, @Param("id") String id) {
 	ctx.json(service.getObjectInstance(id));
+	}
+
+	@Get("/objects/{id}/position")
+	public void getObjectPosition(Context ctx, @Param("id") String id) {
+		ctx.json(service.getObjectPositionSnapshot(id));
 	}
 
 	@Get("/objects")

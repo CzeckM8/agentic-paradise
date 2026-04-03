@@ -24,10 +24,7 @@ if exist "%ENV_FILE%" (
 )
 
 echo Checking for stale process on port %SERVER_PORT%...
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":%SERVER_PORT% "') do (
-    echo Killing stale PID %%a on port %SERVER_PORT%
-    taskkill /PID %%a /F >nul 2>&1
-)
+powershell -NoProfile -Command "$p=Get-NetTCPConnection -LocalPort %SERVER_PORT% -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; foreach($id in $p){ if($id){ Write-Host ('Killing stale PID ' + $id + ' on port %SERVER_PORT%'); Stop-Process -Id $id -Force -ErrorAction SilentlyContinue } }" >nul 2>&1
 
 if not exist logs mkdir logs
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set LOGSTAMP=%%i
@@ -44,7 +41,7 @@ if defined LLM_MODEL (
 
 echo Starting Smallville on port %SERVER_PORT%...
 break > "%LATESTLOG%"
-java %JAVA_OPTS% -jar "target\smallville-1.3.0.jar" --api-key o --port %SERVER_PORT% >> "%LATESTLOG%" 2>&1
+call mvn -q -DskipTests exec:java -Dexec.mainClass=io.github.nickm980.smallville.Smallville -Dexec.args="--api-key o --port %SERVER_PORT%" -Dexec.jvmArgs="%JAVA_OPTS%" >> "%LATESTLOG%" 2>&1
 copy /Y "%LATESTLOG%" "%LOGFILE%" >nul
 
 echo.

@@ -27,26 +27,53 @@ var action_cooldown = 0.0
 var action_cooldown_time = 1.0  # 1 second between actions
 var action_feedback_timer = 0.0
 var action_feedback_duration = 0.3  # Brief visual feedback duration
-var interaction_range = 75.0
+var interaction_range = 96.0
 
 # Reference to backend connector
 var backend_connector = null
+var speech_label: Label = null
+var _speech_timer: float = 0.0
 
 func _ready():
 	# Create a distinctive player sprite (larger than agents)
 	var texture = _create_player_texture()
 	if texture:
 		sprite.texture = texture
-		sprite.position = Vector2.ZERO  # Center the sprite
+		sprite.position = Vector2(16, 16)  # Draw in the center of the logical tile
 		sprite.visible = true
 		print("Player sprite created and visible")
 	else:
 		print("Failed to create player texture")
 	
-	label.position = Vector2(-50, -50)
+	label.position = Vector2(-34, -62)
 	label.add_theme_font_size_override("font_size", 14)
+	label.add_theme_color_override("font_color", Color(0.96, 0.42, 0.20, 1.0))
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	label.custom_minimum_size = Vector2(220, 0)
 	_update_label()
-	
+
+	# Speech bubble label — styled panel above the name label
+	speech_label = Label.new()
+	speech_label.name = "SpeechLabel"
+	speech_label.position = Vector2(-54, -112)
+	speech_label.add_theme_font_size_override("font_size", 10)
+	speech_label.add_theme_color_override("font_color", Color(1.0, 0.82, 0.64, 1.0))
+	speech_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	speech_label.custom_minimum_size = Vector2(140, 0)
+	var bg = StyleBoxFlat.new()
+	bg.bg_color = Color(0.07, 0.07, 0.25, 0.85)
+	bg.content_margin_left = 5
+	bg.content_margin_right = 5
+	bg.content_margin_top = 3
+	bg.content_margin_bottom = 3
+	bg.corner_radius_top_left = 4
+	bg.corner_radius_top_right = 4
+	bg.corner_radius_bottom_left = 4
+	bg.corner_radius_bottom_right = 4
+	speech_label.add_theme_stylebox_override("normal", bg)
+	speech_label.visible = false
+	add_child(speech_label)
+
 	# Get reference to backend connector
 	backend_connector = get_node("../../../BackendConnector")
 	if backend_connector:
@@ -69,6 +96,12 @@ func _process(delta):
 	# Handle action cooldown
 	if action_cooldown > 0:
 		action_cooldown -= delta
+
+	# Tick speech bubble timer
+	if _speech_timer > 0.0:
+		_speech_timer -= delta
+		if _speech_timer <= 0.0 and speech_label != null:
+			speech_label.visible = false
 	
 	# Handle action feedback timer
 	if action_feedback_timer > 0:
@@ -99,13 +132,28 @@ func _key_to_direction(keycode: int) -> Vector2:
 	return Vector2.ZERO
 
 func _input(event):
+	if event is InputEventMouseMotion:
+		if backend_connector:
+			backend_connector.update_mouse_hover(event.position)
+
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+			if backend_connector and not action_locked and not backend_connector.is_dialogue_open():
+				var world_pos = backend_connector.viewport_to_world(event.position)
+				var world_click = backend_connector.tile_to_world(backend_connector.world_to_tile(world_pos))
+				backend_connector.open_context_action_panel_at(world_click)
+			return
+
 	if event is InputEventKey:
+		if event.pressed and not event.echo and backend_connector and backend_connector.has_method("cancel_pending_context_followup_action"):
+			backend_connector.cancel_pending_context_followup_action()
+
 		if action_locked:
 			held_move_dir = Vector2.ZERO
 			return
 
 		# While dialogue UI is open, let the UI consume key presses.
-		if backend_connector and backend_connector.is_dialogue_open():
+		if backend_connector and (backend_connector.is_dialogue_open() or backend_connector.is_context_action_open()):
 			held_move_dir = Vector2.ZERO
 			return
 
@@ -128,10 +176,13 @@ func _input(event):
 		if event.pressed and not event.echo and action_cooldown <= 0:
 			var action_taken = false
 			if event.keycode == KEY_SPACE:
-				_try_interact_nearby()
+				_try_wait_turn()
 				action_taken = true
 			elif event.keycode == KEY_E:
 				_open_dialogue_with_nearby()
+				action_taken = true
+			elif event.keycode == KEY_F:
+				_open_inventory_panel()
 				action_taken = true
 			elif event.keycode == KEY_Q:
 				_try_attack_nearby()
@@ -152,6 +203,17 @@ func set_action_lock(locked: bool, reason: String = ""):
 		if current_activity == "waiting for response":
 			current_activity = "idle"
 	_update_label()
+
+func show_speech(text: String, duration: float = 6.0) -> void:
+	"""Show a floating speech bubble above the player for `duration` seconds."""
+	if speech_label == null:
+		return
+	var display = text.strip_edges()
+	if display.length() > 140:
+		display = display.substr(0, 137) + "..."
+	speech_label.text = display
+	speech_label.visible = true
+	_speech_timer = duration
 
 func _try_step_move(direction: Vector2):
 	"""Move exactly one adjacent tile (W/A/S/D) if bounds and occupancy allow it."""
@@ -227,6 +289,25 @@ func _try_interact_nearby():
 		else:
 			print("No nearby agents to interact with")
 
+func _try_wait_turn():
+	"""Pass one turn without moving or speaking."""
+	if backend_connector == null:
+		return
+
+	backend_connector.enqueue_player_action(
+		player_name,
+		"wait",
+		"",
+		"",
+		position.x,
+		position.y,
+		"Waiting"
+	)
+
+	current_activity = "waiting"
+	_update_label()
+	print("Player waiting one turn")
+
 func _try_speak(message: String):
 	"""Try to speak"""
 	if backend_connector:
@@ -246,7 +327,7 @@ func _try_speak(message: String):
 		print("Player speaking: ", message)
 
 func _open_dialogue_with_nearby():
-	"""Open the dialogue panel with the nearest nearby agent."""
+	"""Focus chat input and target the nearest nearby agent."""
 	if backend_connector == null:
 		return
 
@@ -257,6 +338,19 @@ func _open_dialogue_with_nearby():
 
 	var target_agent = nearby_agents[0]
 	backend_connector.open_dialogue_panel(target_agent)
+
+func _open_context_actions():
+	"""Open contextual actions for nearby objects/entities."""
+	if backend_connector == null:
+		return
+	backend_connector.open_context_action_panel()
+
+func _open_inventory_panel():
+	"""Open player's inventory from backend-authoritative player endpoint."""
+	if backend_connector == null:
+		return
+	if backend_connector.has_method("open_inventory_panel"):
+		backend_connector.open_inventory_panel()
 
 func _try_attack_nearby():
 	"""Try to attack nearby agents"""
