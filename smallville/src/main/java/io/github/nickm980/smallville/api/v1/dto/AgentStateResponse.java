@@ -8,7 +8,8 @@ public class AgentStateResponse {
     private String object;
     private double x;
     private double y;
-    
+    private String targetLocation;
+
     public String getObject() {
 	return object;
     }
@@ -59,6 +60,13 @@ public class AgentStateResponse {
     public void setY(double y) {
         this.y = y;
     }
-    
-    
+
+    public String getTargetLocation() {
+        return targetLocation;
+    }
+
+    public void setTargetLocation(String targetLocation) {
+        this.targetLocation = targetLocation;
+    }
 }
+

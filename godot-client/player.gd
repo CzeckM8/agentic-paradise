@@ -172,6 +172,10 @@ func _try_step_move(direction: Vector2):
 	if target_location == "":
 		return
 
+	if backend_connector.has_method("is_coordinate_blocked") and backend_connector.is_coordinate_blocked(candidate):
+		print("Blocked movement: wall tile at ", candidate)
+		return
+
 	if backend_connector.is_coordinate_occupied(target_location, candidate, player_name):
 		print("Blocked movement: tile occupied at ", candidate)
 		return

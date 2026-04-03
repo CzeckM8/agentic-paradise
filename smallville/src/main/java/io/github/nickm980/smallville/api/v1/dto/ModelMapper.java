@@ -28,6 +28,7 @@ public class ModelMapper {
 	result.setName(agent.getFullName());
 	result.setX(agent.getX());
 	result.setY(agent.getY());
+	result.setTargetLocation(agent.getTargetLocation());
 	return result;
     }
 

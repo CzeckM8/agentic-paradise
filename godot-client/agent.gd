@@ -6,10 +6,13 @@ extends Node2D
 var agent_name = ""
 var current_activity = ""
 var current_location = ""
+var target_location = ""  # Where this NPC wants to go (set by server)
+var target_object_id = ""  # Optional in-location anchor, e.g. coffee_register
 
 # Per-turn discrete positioning (no smooth lerp — turn-based like Elin/Stone Shard)
 var target_position = Vector2.ZERO
 var has_initial_position = false
+var _idle_turn_count: int = 0  # counts idle steps; prevents direction oscillation
 
 func _ready():
 	# Default appearance: diamond marker with white outline.
@@ -23,39 +26,35 @@ func _process(_delta):
 
 func update_from_backend(data, location_map, preset_position: Vector2 = Vector2.ZERO):
 	"""Update agent based on backend data.
-	If preset_position is provided, use it instead of computing from location_map
-	(grid-based spacing from backend_connector.gd)"""
+	Position is only set from server on first initialisation — after that the
+	client steps the NPC toward target_location each turn."""
 	agent_name = data.get("name", "unknown")
 	current_activity = data.get("activity", data.get("action", data.get("currentAction", "idle")))
-	current_location = data.get("location", "unknown")
-	
-	# Prefer server-authoritative coordinates when available.
-	if data.has("x") and data.has("y"):
-		target_position = Vector2(float(data.get("x", 0.0)), float(data.get("y", 0.0)))
-	# Fallback to preset position (legacy client-side grid spacing)
-	elif preset_position != Vector2.ZERO:
-		target_position = preset_position
-	# Otherwise compute from location center
-	elif location_map.has(current_location):
-		var location_data = location_map[current_location]
-		if location_data is Dictionary:
-			# Extract center coordinates from location bounds
-			var center_x = location_data.get("centerX", 50.0)
-			var center_y = location_data.get("centerY", 50.0)
-			target_position = Vector2(center_x, center_y)
-		else:
-			# Fallback for non-dict location data
-			target_position = location_data as Vector2
-	
-	# Update label
-	_update_label()
-	
-	# Update color based on activity keywords
-	_update_appearance()
+	if data.has("location"):
+		var location_value = data.get("location", "unknown")
+		current_location = "" if location_value == null else str(location_value)
+	if data.has("targetLocation"):
+		var target_location_value = data.get("targetLocation", "")
+		target_location = "" if target_location_value == null else str(target_location_value)
+	if data.has("object"):
+		var object_value = data.get("object", "")
+		target_object_id = "" if object_value == null else str(object_value)
 
-	# Always snap to authoritative position — discrete turn-based movement.
-	position = target_position
-	has_initial_position = true
+	# On first spawn, initialise position from server coords or preset
+	if not has_initial_position:
+		if data.has("x") and data.has("y"):
+			position = Vector2(float(data.get("x", 0.0)), float(data.get("y", 0.0)))
+		elif preset_position != Vector2.ZERO:
+			position = preset_position
+		elif location_map.has(current_location):
+			var location_data = location_map[current_location]
+			if location_data is Dictionary:
+				position = Vector2(location_data.get("centerX", 50.0), location_data.get("centerY", 50.0))
+		has_initial_position = true
+
+	# Update label and appearance
+	_update_label()
+	_update_appearance()
 
 func _update_label():
 	"""Update the text label above the agent"""
@@ -110,3 +109,231 @@ func get_agent_info():
 		"location": current_location,
 		"position": position
 	}
+
+func step_client_side(bc: Node) -> void:
+	"""Move one tile per turn using obstacle-aware pathing.
+	If no explicit target is active, perform a small local routine roam."""
+	if not has_initial_position:
+		return
+	current_location = bc.get_location_name_for_position(position, current_location)
+
+	var waypoint = _compute_waypoint(bc)
+	if waypoint == Vector2.ZERO:
+		if target_object_id != "" or target_location != "":
+			return
+		_step_idle_routine(bc)
+		return
+
+	var next_step = _compute_next_step_astar(bc, position, waypoint, 2048)
+	if next_step == Vector2.ZERO:
+		return
+
+	position = bc.snap_to_tile(position + next_step)
+	current_location = bc.get_location_name_for_position(position, current_location)
+	_update_label()
+
+func _compute_waypoint(bc: Node) -> Vector2:
+	"""Return the coordinate this NPC should step toward this turn."""
+	var safe_object_id = "" if target_object_id == null else str(target_object_id)
+	if safe_object_id != "":
+		var target_obj = _find_world_object_by_id(bc, safe_object_id)
+		if not target_obj.is_empty():
+			var object_location = str(target_obj.get("location", ""))
+			if object_location != "" and object_location == current_location:
+				return bc.snap_to_tile(Vector2(float(target_obj.get("x", 0.0)), float(target_obj.get("y", 0.0))))
+
+	if target_location == "":
+		return Vector2.ZERO
+	if not bc.locations.has(target_location):
+		return Vector2.ZERO
+
+	var loc_data = bc.locations[target_location]
+	if not (loc_data is Dictionary):
+		return Vector2.ZERO
+
+	var center = Vector2(
+		float(loc_data.get("centerX", 0.0)),
+		float(loc_data.get("centerY", 0.0))
+	)
+
+	# If already inside the target location, walk toward its center
+	var cur = bc.get_location_name_for_position(position, "")
+	if cur == target_location:
+		return center
+
+	# Look for an entrance anchor in world_objects for this location
+	var nearest_anchor = Vector2.ZERO
+	var best_dist = INF
+	for obj in bc.world_objects:
+		if str(obj.get("type", "")) != "entrance_anchor":
+			continue
+		var obj_loc = str(obj.get("location", ""))
+		if obj_loc == target_location \
+				or obj_loc.ends_with(":" + target_location) \
+				or target_location.ends_with(":" + obj_loc):
+			var anchor_pos = Vector2(float(obj.get("x", 0.0)), float(obj.get("y", 0.0)))
+			var d = position.distance_to(anchor_pos)
+			if d < best_dist:
+				best_dist = d
+				nearest_anchor = anchor_pos
+
+	if nearest_anchor != Vector2.ZERO:
+		var interior = _interior_door_target(bc, nearest_anchor, loc_data)
+		if position.distance_to(interior) <= bc.get_tile_size() * 1.0:
+			return center
+		return interior
+
+	# No anchor — clamp to nearest point inside target bounds
+	var min_x = float(loc_data.get("minX", 0.0))
+	var max_x = float(loc_data.get("maxX", 0.0))
+	var min_y = float(loc_data.get("minY", 0.0))
+	var max_y = float(loc_data.get("maxY", 0.0))
+	return Vector2(
+		clamp(position.x, min_x, max_x),
+		clamp(position.y, min_y, max_y)
+	)
+
+func _find_world_object_by_id(bc: Node, object_id) -> Dictionary:
+	if object_id == null:
+		return {}
+	var safe_id = str(object_id)
+	if safe_id == "":
+		return {}
+	for obj in bc.world_objects:
+		if str(obj.get("id", "")) == safe_id:
+			return obj
+	return {}
+
+func _compute_next_step_astar(bc: Node, from_pos: Vector2, to_pos: Vector2, max_expansions: int = 2048) -> Vector2:
+	"""Return a one-tile cardinal step using A* over the 32px grid."""
+	var start_tile: Vector2i = bc.world_to_tile(from_pos)
+	var goal_tile: Vector2i = bc.world_to_tile(to_pos)
+	if start_tile == goal_tile:
+		return Vector2.ZERO
+
+	var open: Array = [{"tile": start_tile, "g": 0, "f": _manhattan(start_tile, goal_tile)}]
+	var came_from: Dictionary = {}
+	var g_score: Dictionary = {_tile_key(start_tile): 0}
+	var closed: Dictionary = {}
+	var expansions = 0
+
+	while not open.is_empty() and expansions < max_expansions:
+		expansions += 1
+		var best_i = 0
+		var best_f = open[0]["f"]
+		for i in range(1, open.size()):
+			if open[i]["f"] < best_f:
+				best_f = open[i]["f"]
+				best_i = i
+
+		var current = open[best_i]
+		open.remove_at(best_i)
+		var current_tile: Vector2i = current["tile"]
+		var current_key = _tile_key(current_tile)
+		if closed.has(current_key):
+			continue
+		closed[current_key] = true
+
+		if current_tile == goal_tile:
+			var step_tile = _reconstruct_first_step(came_from, start_tile, goal_tile)
+			if step_tile == start_tile:
+				break
+			var world_step = bc.tile_to_world(step_tile) - bc.tile_to_world(start_tile)
+			return bc.snap_to_tile(world_step)
+
+		for dir in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var neighbor = current_tile + dir
+			if closed.has(_tile_key(neighbor)):
+				continue
+			var neighbor_world = bc.tile_to_world(neighbor)
+			if bc.is_coordinate_blocked(neighbor_world):
+				continue
+
+			var bounds = bc.get_world_bounds()
+			if neighbor_world.x < bounds.get("minX", 0.0) or neighbor_world.x > bounds.get("maxX", 1800.0):
+				continue
+			if neighbor_world.y < bounds.get("minY", 0.0) or neighbor_world.y > bounds.get("maxY", 1200.0):
+				continue
+
+			var ng = int(current["g"]) + 1
+			var nkey = _tile_key(neighbor)
+			if not g_score.has(nkey) or ng < int(g_score[nkey]):
+				g_score[nkey] = ng
+				came_from[nkey] = current_tile
+				open.append({"tile": neighbor, "g": ng, "f": ng + _manhattan(neighbor, goal_tile)})
+
+	return Vector2.ZERO
+
+func _interior_door_target(bc: Node, anchor: Vector2, loc_data: Dictionary) -> Vector2:
+	"""Return the world-space tile one step INSIDE the building from the door anchor.
+	The door hole tile is snap_to_tile(anchor); we then step one tile deeper into the
+	building interior so A* goal is never on the wall or outside the building."""
+	var ts = bc.get_tile_size()
+	var min_x = float(loc_data.get("minX", 0.0))
+	var max_x = float(loc_data.get("maxX", 0.0))
+	var min_y = float(loc_data.get("minY", 0.0))
+	var max_y = float(loc_data.get("maxY", 0.0))
+	# snap_to_tile uses round, matching _seed_building_wall_tiles door exclusion
+	var door = bc.snap_to_tile(anchor)
+	var result = door
+	if anchor.x <= min_x + ts:        # left wall → step right into building
+		result.x = door.x + ts
+	elif anchor.x >= max_x - ts:      # right wall → step left into building
+		result.x = door.x - ts
+	elif anchor.y <= min_y + ts:      # top wall → step down into building
+		result.y = door.y + ts
+	elif anchor.y >= max_y - ts:      # bottom wall → step up into building
+		result.y = door.y - ts
+	return result
+
+func _step_idle_routine(bc: Node) -> void:
+	"""Small local movement when no explicit target exists to avoid static NPCs."""
+	if current_location == "" or not bc.locations.has(current_location):
+		return
+	var loc = bc.locations[current_location]
+	if not (loc is Dictionary):
+		return
+
+	_idle_turn_count += 1
+	var tile = bc.get_tile_size()
+	var dirs = [Vector2(tile, 0), Vector2(-tile, 0), Vector2(0, tile), Vector2(0, -tile)]
+	# Use turn-bucketed seed so direction persists 4 turns before changing
+	var seed = abs((agent_name + ":" + str(_idle_turn_count / 4)).hash()) % 4
+	for i in range(4):
+		var step = dirs[(seed + i) % 4]
+		var candidate = bc.snap_to_tile(position + step)
+		if bc.is_coordinate_blocked(candidate):
+			continue
+		if not _is_within_location(candidate, loc):
+			continue
+		position = candidate
+		current_location = bc.get_location_name_for_position(position, current_location)
+		_update_label()
+		return
+
+func _is_within_location(world_pos: Vector2, loc_data: Dictionary) -> bool:
+	return world_pos.x >= float(loc_data.get("minX", 0.0)) \
+		and world_pos.x <= float(loc_data.get("maxX", 0.0)) \
+		and world_pos.y >= float(loc_data.get("minY", 0.0)) \
+		and world_pos.y <= float(loc_data.get("maxY", 0.0))
+
+func _manhattan(a: Vector2i, b: Vector2i) -> int:
+	return abs(a.x - b.x) + abs(a.y - b.y)
+
+func _tile_key(tile: Vector2i) -> String:
+	return str(tile.x) + "," + str(tile.y)
+
+func _reconstruct_first_step(came_from: Dictionary, start_tile: Vector2i, goal_tile: Vector2i) -> Vector2i:
+	var cursor = goal_tile
+	var cursor_key = _tile_key(cursor)
+	if not came_from.has(cursor_key):
+		return start_tile
+
+	while true:
+		var prev: Vector2i = came_from.get(_tile_key(cursor), start_tile)
+		if prev == start_tile:
+			return cursor
+		if prev == cursor:
+			return start_tile
+		cursor = prev
+	return start_tile

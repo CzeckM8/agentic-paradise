@@ -6,6 +6,8 @@ var pan_speed = 500
 # Add camera bounds
 var min_pos = Vector2(0,0)
 var max_pos = Vector2(1800, 1200)
+var manual_pan_offset = Vector2.ZERO
+var manual_pan_decay = 3.0
 
 # Reference to player
 var player = null
@@ -36,17 +38,8 @@ func _process(delta):
 		if player_lookup_timer <= 0.0:
 			_find_player()
 			player_lookup_timer = player_lookup_cooldown
-	
-	# Follow player if it exists and is valid
-	if player and is_instance_valid(player):
-		var target_position = player.position
-		position = position.lerp(target_position, 5.0 * delta)
-		
-		position.x = clamp(position.x, player.position.x - 200, player.position.x + 200)
-		position.y = clamp(position.y, player.position.y - 150, player.position.y + 150)
-		return
-	
-	# Fallback: Pan with ARROW keys (not WASD, which is for player movement)
+
+	# Pan with ARROW keys (not WASD, which is for player movement)
 	var direction = Vector2.ZERO
 	if Input.is_action_pressed("ui_right"):
 		direction.x += 1 
@@ -56,10 +49,22 @@ func _process(delta):
 		direction.y -= 1
 	if Input.is_action_pressed("ui_down"):
 		direction.y += 1
-	
-	position += direction * pan_speed * delta / zoom.x
-	
-	# Clamp camera position to bounds
+
+	if direction != Vector2.ZERO:
+		manual_pan_offset += direction.normalized() * pan_speed * delta / zoom.x
+	else:
+		# Ease camera back toward the player when not manually panning.
+		manual_pan_offset = manual_pan_offset.lerp(Vector2.ZERO, manual_pan_decay * delta)
+
+	var follow_target = position
+	if player and is_instance_valid(player):
+		follow_target = player.position + manual_pan_offset
+	else:
+		follow_target = position + manual_pan_offset
+
+	position = position.lerp(follow_target, 5.0 * delta)
+
+	# Clamp camera position to world bounds.
 	position.x = clamp(position.x, min_pos.x, max_pos.x)
 	position.y = clamp(position.y, min_pos.y, max_pos.y)
 

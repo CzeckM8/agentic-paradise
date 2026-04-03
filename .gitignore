@@ -11,6 +11,13 @@ out
 pages
 node_modules
 
+# Local environment secrets
+.env
+
+# Local debug artifacts
+a_dam_log.txt
+smallville/build_output.txt
+
 # Godot-specific
 godot-client/.godot/
 godot-client/.import/

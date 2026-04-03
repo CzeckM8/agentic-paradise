@@ -130,6 +130,11 @@ public final class SimulationController {
 	ctx.json(Map.of("agentName", name, "items", schedule, "byType", byType));
 	}
 
+	@Get("/agents/{name}/agentic")
+	public void getAgenticState(Context ctx, @Param("name") String name) {
+	ctx.json(service.getAgenticState(name));
+	}
+
     @Post("/agents/{name}/ask")
     public void askAgentQuestion(Context ctx) {
 	AskQuestionRequest request = ctx

@@ -1,32 +1,32 @@
-[gd_scene load_steps=3 format=3 uid="uid://dpsdohc4swhjh"]
+[gd_scene format=3 uid="uid://dpsdohc4swhjh"]
 
 [ext_resource type="Script" uid="uid://c6iv1qo62j6d6" path="res://backend_connector.gd" id="1_ig7tw"]
 [ext_resource type="Script" uid="uid://beywxueyfrsuu" path="res://camera.gd" id="2_0xm2m"]
 
-[node name="Main" type="Node2D"]
+[node name="Main" type="Node2D" unique_id=392394917]
 
-[node name="BackendConnector" type="Node" parent="."]
+[node name="BackendConnector" type="Node" parent="." unique_id=213056243]
 script = ExtResource("1_ig7tw")
 
-[node name="World" type="Node2D" parent="."]
+[node name="World" type="Node2D" parent="." unique_id=1091485549]
 
-[node name="TileMapLayer" type="TileMapLayer" parent="World"]
+[node name="TileMapLayer" type="TileMapLayer" parent="World" unique_id=1170288421]
 
-[node name="Agents" type="Node2D" parent="World"]
+[node name="Agents" type="Node2D" parent="World" unique_id=1979780849]
 
-[node name="Camera" type="Camera2D" parent="World"]
+[node name="Camera" type="Camera2D" parent="World" unique_id=940159086]
 script = ExtResource("2_0xm2m")
 
-[node name="UI" type="CanvasLayer" parent="."]
+[node name="UI" type="CanvasLayer" parent="." unique_id=220146467]
 
-[node name="DebugLabel" type="Label" parent="UI"]
+[node name="DebugLabel" type="Label" parent="UI" unique_id=651737659]
 custom_minimum_size = Vector2(10, 10)
 offset_right = 40.0
 offset_bottom = 23.0
 theme_override_font_sizes/font_size = 14
 text = "Connecting to backend..."
 
-[node name="ControlsLabel" type="Label" parent="UI"]
+[node name="ControlsLabel" type="Label" parent="UI" unique_id=2136664812]
 offset_left = 10.0
 offset_top = 30.0
 offset_right = 400.0
@@ -42,49 +42,55 @@ Q: Attack nearby agents
 Blue circle = Player
 Diamond markers = NPCs"
 
-[node name="DialoguePanel" type="Panel" parent="UI"]
+[node name="DialoguePanel" type="Panel" parent="UI" unique_id=1317299073]
 visible = false
 offset_left = 10.0
 offset_top = 160.0
 offset_right = 560.0
 offset_bottom = 360.0
 
-[node name="DialogueVBox" type="VBoxContainer" parent="UI/DialoguePanel"]
+[node name="DialogueVBox" type="VBoxContainer" parent="UI/DialoguePanel" unique_id=2127056565]
+layout_mode = 0
 offset_left = 10.0
 offset_top = 10.0
 offset_right = 540.0
 offset_bottom = 190.0
 
-[node name="DialogueTargetLabel" type="Label" parent="UI/DialoguePanel/DialogueVBox"]
+[node name="DialogueTargetLabel" type="Label" parent="UI/DialoguePanel/DialogueVBox" unique_id=14443351]
+layout_mode = 2
 text = "Talking to: (none)"
 
-[node name="DialogueLog" type="RichTextLabel" parent="UI/DialoguePanel/DialogueVBox"]
+[node name="DialogueLog" type="RichTextLabel" parent="UI/DialoguePanel/DialogueVBox" unique_id=1897520225]
 custom_minimum_size = Vector2(0, 120)
-bbcode_enabled = false
-text = ""
+layout_mode = 2
+scroll_following = true
 
-[node name="DialogueInputRow" type="HBoxContainer" parent="UI/DialoguePanel/DialogueVBox"]
+[node name="DialogueInputRow" type="HBoxContainer" parent="UI/DialoguePanel/DialogueVBox" unique_id=576388621]
+layout_mode = 2
 
-[node name="DialogueInput" type="LineEdit" parent="UI/DialoguePanel/DialogueVBox/DialogueInputRow"]
+[node name="DialogueInput" type="LineEdit" parent="UI/DialoguePanel/DialogueVBox/DialogueInputRow" unique_id=1650906870]
+layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "Type what you want to say..."
 
-[node name="DialogueSendButton" type="Button" parent="UI/DialoguePanel/DialogueVBox/DialogueInputRow"]
+[node name="DialogueSendButton" type="Button" parent="UI/DialoguePanel/DialogueVBox/DialogueInputRow" unique_id=219409276]
+layout_mode = 2
 text = "Send"
 
-[node name="DialogueStatus" type="Label" parent="UI/DialoguePanel/DialogueVBox"]
+[node name="DialogueStatus" type="Label" parent="UI/DialoguePanel/DialogueVBox" unique_id=287575163]
+layout_mode = 2
 text = "Press E near an NPC to open dialogue"
 
-[node name="LoadingOverlay" type="CanvasLayer" parent="UI"]
+[node name="LoadingOverlay" type="CanvasLayer" parent="UI" unique_id=684617188]
 layer = 10
 
-[node name="Background" type="ColorRect" parent="UI/LoadingOverlay"]
+[node name="Background" type="ColorRect" parent="UI/LoadingOverlay" unique_id=1362563860]
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 color = Color(0.05, 0.05, 0.1, 0.88)
 
-[node name="VBox" type="VBoxContainer" parent="UI/LoadingOverlay"]
+[node name="VBox" type="VBoxContainer" parent="UI/LoadingOverlay" unique_id=65599127]
 anchors_preset = 8
 anchor_left = 0.5
 anchor_top = 0.5
@@ -96,13 +102,15 @@ offset_right = 220.0
 offset_bottom = 60.0
 alignment = 1
 
-[node name="Title" type="Label" parent="UI/LoadingOverlay/VBox"]
-horizontal_alignment = 1
+[node name="Title" type="Label" parent="UI/LoadingOverlay/VBox" unique_id=2080524662]
+layout_mode = 2
 theme_override_font_sizes/font_size = 22
 text = "Preparing the world..."
-
-[node name="Status" type="Label" parent="UI/LoadingOverlay/VBox"]
 horizontal_alignment = 1
-theme_override_font_sizes/font_size = 14
+
+[node name="Status" type="Label" parent="UI/LoadingOverlay/VBox" unique_id=86350327]
 modulate = Color(0.8, 0.8, 0.8, 1)
+layout_mode = 2
+theme_override_font_sizes/font_size = 14
 text = "Generating NPC schedules via AI — please wait"
+horizontal_alignment = 1

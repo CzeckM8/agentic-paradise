@@ -45,6 +45,12 @@ public class SimulationService {
 	private static final String DEFAULT_TRACKED_AGENT_NAME = "Alex";
 	private static final long TRACK_HEARTBEAT_MINUTES = 5;
 	private static final double TRACE_POSITION_EPSILON = 0.1;
+	private static final String AGENTIC_OBJECTIVE_SOCIAL_CONTACT = "social_contact";
+	private static final double AGENTIC_SOCIAL_AWARENESS_RADIUS = 180.0;
+	private static final double AGENTIC_INITIATE_RADIUS = 110.0;
+	private static final double AGENTIC_DISENGAGE_RADIUS = 135.0;
+	private static final int AGENTIC_MAX_DEFERRED_TURNS = 4;
+	private static final long AGENTIC_SOCIAL_COOLDOWN_MINUTES = 20;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private volatile String trackedAgentName = DEFAULT_TRACKED_AGENT_NAME;
 
@@ -64,6 +70,7 @@ public class SimulationService {
 	private final Map<String, RuntimeAgentState> runtimeStateByAgent = new ConcurrentHashMap<>();
 	private final Map<String, Deque<ReactiveEvent>> reactiveEventsByAgent = new ConcurrentHashMap<>();
 	private final Map<String, Deque<CommittedAction>> committedActionsByAgent = new ConcurrentHashMap<>();
+	private final Map<String, AgenticRuntimeState> agenticStateByAgent = new ConcurrentHashMap<>();
 
 	private static class RuntimeAgentState {
 		private LocalDate lastRoutineDate;
@@ -101,6 +108,45 @@ public class SimulationService {
 		private String targetLocation;
 		private double stressDelta;
 		private String reason;
+	}
+
+	private enum AgenticPhase {
+		IDLE,
+		APPROACH_PLAYER,
+		AWAITING_PLAYER_REPLY,
+		COOLDOWN
+	}
+
+	private static class KnowledgeEntry {
+		private List<String> values = new ArrayList<>();
+		private double confidence;
+		private LocalDateTime updatedAt;
+		private String source;
+
+		private boolean isFresh(LocalDateTime now, long ttlMinutes) {
+			if (updatedAt == null || now == null) {
+				return false;
+			}
+			return Duration.between(updatedAt, now).toMinutes() <= ttlMinutes;
+		}
+	}
+
+	private static class AgenticRuntimeState {
+		private AgenticPhase phase = AgenticPhase.IDLE;
+		private String currentObjective;
+		private String targetObjectId;
+		private LocalDateTime phaseUpdatedAt;
+		private LocalDateTime cooldownUntil;
+		private String pendingPlayerId;
+		private boolean chatWindowClosedObserved;
+		private boolean pinnedLastTurn;
+		private int deferredTurns;
+		private int recentIgnoreCount;
+		private double lastInitiativeScore;
+		private String lastOutcome;
+		private LocalDateTime lastInitiatedAt;
+		private LocalDateTime lastRepliedAt;
+		private String lastError;
 	}
 
 	private static class WorldObjectInstance {
@@ -166,14 +212,31 @@ public class SimulationService {
 
     public AgentStateResponse getAgentState(String name) {
 	Agent agent = world.getAgent(name).orElseThrow(() -> new AgentNotFoundException(name));
-	return mapper.fromAgent(agent);
+	return buildAgentStateResponse(agent);
     }
 
     public List<AgentStateResponse> getAgents() {
 	List<Agent> agents = world.getAgents();
 
-	return agents.stream().map(mapper::fromAgent).collect(Collectors.toList());
+	return agents.stream().map(this::buildAgentStateResponse).collect(Collectors.toList());
     }
+
+	private AgentStateResponse buildAgentStateResponse(Agent agent) {
+		AgentStateResponse response = mapper.fromAgent(agent);
+		response.setObject(getActiveTargetObjectId(agent));
+		return response;
+	}
+
+	private String getActiveTargetObjectId(Agent agent) {
+		if (agent == null || agent.getFullName() == null) {
+			return null;
+		}
+		AgenticRuntimeState state = agenticStateByAgent.get(agent.getFullName());
+		if (state == null || state.targetObjectId == null || state.targetObjectId.isBlank()) {
+			return null;
+		}
+		return state.targetObjectId;
+	}
 
     public List<LocationStateResponse> getAllLocations() {
 	if (cachedLocations != null) {
@@ -394,7 +457,7 @@ public class SimulationService {
 	}
 
 	SimulationTime.update();
-	orchestrateRuntime(new RuntimeOrchestrationRequest());
+	orchestrateRuntime(new RuntimeOrchestrationRequest(), null);
     }
 
     public List<ConversationResponse> getConversations() {
@@ -486,7 +549,7 @@ public class SimulationService {
 			if (orchestrationRequest == null) {
 				orchestrationRequest = new RuntimeOrchestrationRequest();
 			}
-			Map<String, Object> runtimeSummary = orchestrateRuntime(orchestrationRequest);
+			Map<String, Object> runtimeSummary = orchestrateRuntime(orchestrationRequest, null);
 			PlayerActionResponse noActionResponse = new PlayerActionResponse(false, "No actions in queue");
 			noActionResponse.setResult("Turn advanced without queued player action | runtime=" + runtimeSummary);
 			return noActionResponse;
@@ -519,7 +582,7 @@ public class SimulationService {
 				orchestrationRequest.addPinnedAgent(request.getTargetAgent());
 			}
 		}
-		Map<String, Object> runtimeSummary = orchestrateRuntime(orchestrationRequest);
+		Map<String, Object> runtimeSummary = orchestrateRuntime(orchestrationRequest, request);
 		if (response.getResult() == null || response.getResult().isBlank()) {
 			response.setResult(response.isSuccess() ? "Turn processed" : "Turn processed with failed player action");
 		}
@@ -631,7 +694,7 @@ public class SimulationService {
 			player.setCurrentActivity(request.getActionDescription() != null ? request.getActionDescription() : "Interacted");
 			// Attack uses high severity (9) so the target always reacts via LLM.
 			// Basic interact uses severity 4 so the event is recorded deterministically
-			// without blocking the turn with an LLM call — dialogue content comes from speak actions.
+			// without blocking the turn with an LLM call â€” dialogue content comes from speak actions.
 			int eventSeverity = "attack".equalsIgnoreCase(request.getActionType()) ? 9 : 4;
 			enqueueReactiveEvent(targetAgent.getFullName(),
 			    request.getActionDescription() != null ? request.getActionDescription() : "direct interaction",
@@ -819,6 +882,8 @@ public class SimulationService {
 			if (a.getLocation() != null) d.setLocation(a.getLocation().getFullPath());
 			d.setCurrentAction(a.getCurrentActivity());
 			d.setEmoji(a.getEmoji());
+			d.setObject(getActiveTargetObjectId(a));
+			d.setTargetLocation(a.getTargetLocation());
 			d.setStressLevel(a.getStressLevel());
 			d.setMentalState(a.getMentalState());
 			d.setX(a.getX());
@@ -899,6 +964,7 @@ public class SimulationService {
 	instance.properties = merged;
 
 	objectInstances.put(objectId, instance);
+
 	return instance.toMap();
     }
 
@@ -989,6 +1055,10 @@ public class SimulationService {
     }
 
     public Map<String, Object> orchestrateRuntime(RuntimeOrchestrationRequest request) {
+	return orchestrateRuntime(request, null);
+    }
+
+    private Map<String, Object> orchestrateRuntime(RuntimeOrchestrationRequest request, PlayerActionRequest lastPlayerAction) {
 	Map<String, Object> summary = new LinkedHashMap<>();
 	List<String> llmUpdated = new ArrayList<>();
 	List<String> deterministicUpdated = new ArrayList<>();
@@ -1000,6 +1070,30 @@ public class SimulationService {
 	Location playerLocation = null;
 	if (request.getPlayerX() != null && request.getPlayerY() != null) {
 	    playerLocation = findLocationAt(request.getPlayerX(), request.getPlayerY());
+	}
+
+	// Apply client-reported NPC positions and detect arrivals
+	if (request.getNpcPositions() != null && !request.getNpcPositions().isEmpty()) {
+	    for (java.util.Map<String, Object> pos : request.getNpcPositions()) {
+		String npcName = (String) pos.get("name");
+		if (npcName == null) continue;
+		Agent npc = world.getAgent(npcName).orElse(null);
+		if (npc == null || npc instanceof Player) continue;
+		double nx = pos.containsKey("x") ? ((Number) pos.get("x")).doubleValue() : npc.getX();
+		double ny = pos.containsKey("y") ? ((Number) pos.get("y")).doubleValue() : npc.getY();
+		npc.setPosition(nx, ny);
+		Location npcLoc = findLocationAt(nx, ny);
+		if (npcLoc != null) {
+		    npc.setLocation(npcLoc);
+		}
+		if (npc.getTargetLocation() != null) {
+		    Location targetLoc = world.getLocation(npc.getTargetLocation()).orElse(null);
+		    if (targetLoc != null && targetLoc.isWithinBounds(nx, ny)) {
+			npc.setLocation(targetLoc);
+			npc.setTargetLocation(null);
+		    }
+		}
+	    }
 	}
 
 	for (Agent agent : world.getAgents()) {
@@ -1065,11 +1159,8 @@ public class SimulationService {
 		    deterministicUpdated.add(agent.getFullName());
 		    traceTrackedAgent(agent, state, "after-deterministic-catchup");
 		}
-	    }
 
-	    if (!request.isPinned(agent.getFullName())) {
-		advanceAgentMovement(agent);
-		traceTrackedAgent(agent, state, "after-movement");
+	    runAgenticObjectiveLoop(agent, state, now, request, lastPlayerAction);
 	    }
 
 	    // Mark agent as orchestrated after first movement pass
@@ -1194,6 +1285,332 @@ public class SimulationService {
 		}
 	}
 
+	public Map<String, Object> getAgenticState(String agentName) {
+		Agent agent = world.getAgent(agentName).orElseThrow(() -> new AgentNotFoundException(agentName));
+		AgenticRuntimeState state = agenticStateByAgent.computeIfAbsent(agent.getFullName(), k -> new AgenticRuntimeState());
+
+		Map<String, Object> view = new LinkedHashMap<>();
+		view.put("agent", agent.getFullName());
+		view.put("phase", state.phase.name());
+		view.put("objective", state.currentObjective);
+		view.put("targetObject", state.targetObjectId);
+		view.put("pendingPlayer", state.pendingPlayerId);
+		view.put("chatWindowClosedObserved", state.chatWindowClosedObserved);
+		view.put("deferredTurns", state.deferredTurns);
+		view.put("recentIgnoreCount", state.recentIgnoreCount);
+		view.put("lastInitiativeScore", state.lastInitiativeScore);
+		view.put("lastOutcome", state.lastOutcome);
+		view.put("lastInitiatedAt", state.lastInitiatedAt == null ? null : state.lastInitiatedAt.toString());
+		view.put("lastRepliedAt", state.lastRepliedAt == null ? null : state.lastRepliedAt.toString());
+		view.put("cooldownUntil", state.cooldownUntil == null ? null : state.cooldownUntil.toString());
+		view.put("lastError", state.lastError);
+		return view;
+	}
+
+	private void runAgenticObjectiveLoop(
+		Agent agent,
+		RuntimeAgentState runtimeState,
+		LocalDateTime now,
+		RuntimeOrchestrationRequest request,
+		PlayerActionRequest lastPlayerAction) {
+		runAgenticSocialLoop(agent, runtimeState, now, request, lastPlayerAction);
+	}
+
+	private void runAgenticSocialLoop(
+		Agent agent,
+		RuntimeAgentState runtimeState,
+		LocalDateTime now,
+		RuntimeOrchestrationRequest request,
+		PlayerActionRequest lastPlayerAction) {
+		if (agent == null || agent instanceof Player) {
+			return;
+		}
+
+		AgenticRuntimeState state = agenticStateByAgent.computeIfAbsent(agent.getFullName(), k -> new AgenticRuntimeState());
+		Agent player = findPrimaryPlayer();
+		if (player == null) {
+			return;
+		}
+
+		boolean playerVisible = isWithinSocialAwareness(agent, player, request);
+		double initiativeScore = computeSocialInitiativeScore(agent, player);
+		state.lastInitiativeScore = initiativeScore;
+
+		try {
+			switch (state.phase) {
+				case IDLE -> {
+					if (!playerVisible || !shouldInitiateSocialContact(agent, state, initiativeScore, now)) {
+						return;
+					}
+					state.currentObjective = AGENTIC_OBJECTIVE_SOCIAL_CONTACT;
+					state.targetObjectId = null;
+					state.lastError = null;
+					if (isWithinInitiateRange(agent, player)) {
+						initiateConversationWithPlayer(agent, player, state, now);
+					} else {
+						transitionAgenticPhase(state, AgenticPhase.APPROACH_PLAYER, now);
+						moveTowardPlayer(agent, player);
+						LOG.info("[Agentic] {} objective=social_contact phase=APPROACH_PLAYER score={}",
+							agent.getFullName(), String.format("%.2f", initiativeScore));
+					}
+				}
+				case APPROACH_PLAYER -> {
+					if (!playerVisible) {
+						state.currentObjective = null;
+						transitionAgenticPhase(state, AgenticPhase.IDLE, now);
+						agent.setTargetLocation(null);
+						return;
+					}
+					moveTowardPlayer(agent, player);
+					if (isWithinInitiateRange(agent, player)) {
+						initiateConversationWithPlayer(agent, player, state, now);
+					}
+				}
+				case AWAITING_PLAYER_REPLY -> {
+					evaluatePendingSocialOutcome(agent, player, state, now, request, lastPlayerAction);
+				}
+				case COOLDOWN -> {
+					if (state.cooldownUntil == null || now == null || !now.isBefore(state.cooldownUntil)) {
+						transitionAgenticPhase(state, AgenticPhase.IDLE, now);
+						state.currentObjective = null;
+						state.pendingPlayerId = null;
+						state.chatWindowClosedObserved = false;
+						state.pinnedLastTurn = false;
+						state.deferredTurns = 0;
+					}
+				}
+			}
+		} catch (Exception e) {
+			state.lastError = e.getMessage();
+			LOG.error("[Agentic] {} loop error at phase {}: {}", agent.getFullName(), state.phase, e.getMessage(), e);
+		}
+
+		traceTrackedAgent(agent, runtimeState, "after-agentic-" + state.phase.name().toLowerCase());
+	}
+
+	private void transitionAgenticPhase(AgenticRuntimeState state, AgenticPhase next, LocalDateTime now) {
+		if (state == null) {
+			return;
+		}
+		if (state.phase != next) {
+			state.phase = next;
+		}
+		state.phaseUpdatedAt = now;
+	}
+
+	private Agent findPrimaryPlayer() {
+		for (Agent candidate : world.getAgents()) {
+			if (candidate instanceof Player) {
+				return candidate;
+			}
+		}
+		return null;
+	}
+
+	private boolean isWithinSocialAwareness(Agent agent, Agent player, RuntimeOrchestrationRequest request) {
+		if (agent == null || player == null || player.getLocation() == null || agent.getLocation() == null) {
+			return false;
+		}
+		if (!player.getLocation().getFullPath().equals(agent.getLocation().getFullPath())) {
+			return false;
+		}
+		double px = request != null && request.getPlayerX() != null ? request.getPlayerX() : player.getX();
+		double py = request != null && request.getPlayerY() != null ? request.getPlayerY() : player.getY();
+		double dx = agent.getX() - px;
+		double dy = agent.getY() - py;
+		return Math.hypot(dx, dy) <= AGENTIC_SOCIAL_AWARENESS_RADIUS;
+	}
+
+	private boolean isWithinInitiateRange(Agent agent, Agent player) {
+		if (agent == null || player == null || agent.getLocation() == null || player.getLocation() == null) {
+			return false;
+		}
+		if (!agent.getLocation().getFullPath().equals(player.getLocation().getFullPath())) {
+			return false;
+		}
+		return calculateDistance(agent, player) <= AGENTIC_INITIATE_RADIUS;
+	}
+
+	private boolean shouldInitiateSocialContact(Agent agent, AgenticRuntimeState state, double initiativeScore, LocalDateTime now) {
+		if (agent == null || state == null) {
+			return false;
+		}
+		if (state.phase != AgenticPhase.IDLE) {
+			return false;
+		}
+		if (state.cooldownUntil != null && now != null && now.isBefore(state.cooldownUntil)) {
+			return false;
+		}
+		double threshold = 0.55 + (state.recentIgnoreCount * 0.1);
+		return initiativeScore >= threshold;
+	}
+
+	private double computeSocialInitiativeScore(Agent agent, Agent player) {
+		if (agent == null || player == null) {
+			return 0.0;
+		}
+		double distance = calculateDistance(agent, player);
+		double proximity = clamp01(1.0 - (distance / AGENTIC_SOCIAL_AWARENESS_RADIUS));
+		double sociability = clamp01(
+			(agent.getCompassion() * 0.35)
+			+ (agent.getSocialDominance() * 0.35)
+			+ (agent.getRiskTolerance() * 0.2)
+			+ ((1.0 - agent.getFearfulness()) * 0.1));
+		return clamp01((proximity * 0.45) + (sociability * 0.55));
+	}
+
+	private void moveTowardPlayer(Agent agent, Agent player) {
+		if (agent == null || player == null) {
+			return;
+		}
+		if (player.getLocation() != null) {
+			agent.setTargetLocation(player.getLocation().getFullPath());
+		}
+		agent.setCurrentActivity("agentic: moving closer to start a conversation");
+	}
+
+	private void initiateConversationWithPlayer(Agent agent, Agent player, AgenticRuntimeState state, LocalDateTime now) {
+		if (agent == null || player == null || state == null) {
+			return;
+		}
+		String opener = buildPersonalityOpening(agent, player);
+		if (opener != null && !opener.isBlank()) {
+			List<Dialog> lines = new ArrayList<>();
+			lines.add(new Dialog(agent.getFullName(), opener));
+			world.create(new Conversation(agent.getFullName(), player.getFullName(), lines));
+		}
+		agent.setTargetLocation(null);
+		agent.setCurrentActivity("agentic: speaking to player");
+		recordCommittedAction(agent, "SPEAK", "initiated conversation with player");
+		agent.getMemoryStream().add(new Observation("Initiated conversation with " + player.getFullName() + ": " + opener));
+
+		transitionAgenticPhase(state, AgenticPhase.AWAITING_PLAYER_REPLY, now);
+		state.pendingPlayerId = player.getFullName();
+		state.chatWindowClosedObserved = false;
+		state.pinnedLastTurn = false;
+		state.deferredTurns = 0;
+		state.lastInitiatedAt = now;
+		state.lastOutcome = "initiated";
+		LOG.info("[Agentic] {} initiated social chat with {}", agent.getFullName(), player.getFullName());
+	}
+
+	private void evaluatePendingSocialOutcome(
+		Agent agent,
+		Agent player,
+		AgenticRuntimeState state,
+		LocalDateTime now,
+		RuntimeOrchestrationRequest request,
+		PlayerActionRequest lastPlayerAction) {
+		if (agent == null || player == null || state == null) {
+			return;
+		}
+
+		boolean pinnedNow = request != null && request.isPinned(agent.getFullName());
+		if (state.pinnedLastTurn && !pinnedNow) {
+			state.chatWindowClosedObserved = true;
+		}
+		state.pinnedLastTurn = pinnedNow;
+
+		if (isReplyToAgent(lastPlayerAction, player, agent)) {
+			agent.setCurrentActivity("agentic: engaged in conversation");
+			state.lastRepliedAt = now;
+			state.lastOutcome = "success";
+			state.recentIgnoreCount = Math.max(0, state.recentIgnoreCount - 1);
+			enterSocialCooldown(state, now, "success");
+			LOG.info("[Agentic] {} social outcome=success player={}", agent.getFullName(), player.getFullName());
+			return;
+		}
+
+		if (state.chatWindowClosedObserved && isMoveAwayAction(lastPlayerAction, player, agent)) {
+			agent.setCurrentActivity("agentic: conversation declined");
+			state.recentIgnoreCount = Math.min(5, state.recentIgnoreCount + 1);
+			state.lastOutcome = "ignored";
+			enterSocialCooldown(state, now, "ignored");
+			LOG.info("[Agentic] {} social outcome=ignored player={}", agent.getFullName(), player.getFullName());
+			return;
+		}
+
+		if (lastPlayerAction != null && player.getFullName().equals(lastPlayerAction.getPlayerId())) {
+			state.deferredTurns++;
+		}
+
+		if (state.deferredTurns >= AGENTIC_MAX_DEFERRED_TURNS) {
+			agent.setCurrentActivity("agentic: deferred conversation");
+			state.lastOutcome = "deferred";
+			enterSocialCooldown(state, now, "deferred");
+			LOG.info("[Agentic] {} social outcome=deferred player={}", agent.getFullName(), player.getFullName());
+		}
+	}
+
+	private boolean isReplyToAgent(PlayerActionRequest action, Agent player, Agent agent) {
+		if (action == null || player == null || agent == null) {
+			return false;
+		}
+		if (!player.getFullName().equals(action.getPlayerId())) {
+			return false;
+		}
+		String type = action.getActionType() == null ? "" : action.getActionType().toLowerCase();
+		boolean isSpeak = "speak".equals(type) || "talk".equals(type) || (action.getSpeakText() != null && !action.getSpeakText().isBlank());
+		if (!isSpeak) {
+			return false;
+		}
+		return action.getTargetAgent() != null && action.getTargetAgent().equalsIgnoreCase(agent.getFullName());
+	}
+
+	private boolean isMoveAwayAction(PlayerActionRequest action, Agent player, Agent agent) {
+		if (action == null || player == null || agent == null) {
+			return false;
+		}
+		if (!player.getFullName().equals(action.getPlayerId())) {
+			return false;
+		}
+		if (action.getActionType() == null || !"move".equalsIgnoreCase(action.getActionType())) {
+			return false;
+		}
+		if (player.getLocation() == null || agent.getLocation() == null) {
+			return true;
+		}
+		if (!player.getLocation().getFullPath().equals(agent.getLocation().getFullPath())) {
+			return true;
+		}
+		return calculateDistance(player, agent) > AGENTIC_DISENGAGE_RADIUS;
+	}
+
+	private void enterSocialCooldown(AgenticRuntimeState state, LocalDateTime now, String outcome) {
+		if (state == null) {
+			return;
+		}
+		transitionAgenticPhase(state, AgenticPhase.COOLDOWN, now);
+		state.cooldownUntil = now == null ? null : now.plusMinutes(AGENTIC_SOCIAL_COOLDOWN_MINUTES);
+		state.currentObjective = null;
+		state.pendingPlayerId = null;
+		state.chatWindowClosedObserved = false;
+		state.pinnedLastTurn = false;
+		state.deferredTurns = 0;
+		state.lastOutcome = outcome;
+	}
+
+	private String buildPersonalityOpening(Agent agent, Agent player) {
+		String playerName = player == null ? "there" : player.getFullName();
+		if (agent.getFearfulness() >= 0.7) {
+			return "Hey " + playerName + ", quick check-in... is everything okay around here?";
+		}
+		if (agent.getSocialDominance() >= 0.7) {
+			return "" + playerName + ", got a minute? I want your take on something.";
+		}
+		if (agent.getCompassion() >= 0.65) {
+			return "Hi " + playerName + ", how are you holding up today?";
+		}
+		if (agent.getImpulsivity() >= 0.7) {
+			return "Hey " + playerName + "! You won't believe what I was just thinking about.";
+		}
+		return "Hey " + playerName + ", want to chat for a moment?";
+	}
+
+	private double clamp01(double value) {
+		return Math.max(0.0, Math.min(1.0, value));
+	}
+
     private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
 	InstinctDecision decision = evaluateInstinctDecision(agent, event);
 	if (decision != null) {
@@ -1220,7 +1637,9 @@ public class SimulationService {
 	    agent.applyStressChange(-0.01);
 	}
 
-	applyScheduledActivity(agent);
+	if (!isAgenticMovementLocked(agent)) {
+	    applyScheduledActivity(agent);
+	}
 
 	if (shouldRecoverFromTransientReactiveState(agent)) {
 	    LOG.info("[Reactive] Clearing stale reactive state for {}", agent.getFullName());
@@ -1230,6 +1649,18 @@ public class SimulationService {
 	if (agent.getCurrentActivity() == null || agent.getCurrentActivity().isBlank() || "idle".equalsIgnoreCase(agent.getCurrentActivity())) {
 	    agent.setCurrentActivity("following routine");
 	}
+	}
+
+	private boolean isAgenticMovementLocked(Agent agent) {
+		if (agent == null || agent.getFullName() == null) {
+			return false;
+		}
+		AgenticRuntimeState state = agenticStateByAgent.get(agent.getFullName());
+		if (state == null || state.phase == null) {
+			return false;
+		}
+		return state.phase == AgenticPhase.APPROACH_PLAYER
+			|| state.phase == AgenticPhase.AWAITING_PLAYER_REPLY;
 	}
 
 	private boolean shouldRecoverFromTransientReactiveState(Agent agent) {
@@ -1566,7 +1997,15 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 	}
 
 	private String stripLeadingTime(String description) {
-		return description.replaceFirst("^\\s*\\d{1,2}:\\d{2}\\s*[AaPp][Mm]\\s*", "").trim();
+		if (description == null) {
+			return "";
+		}
+		String sanitized = description.trim();
+		sanitized = sanitized.replaceFirst("^\\s*[-*•]+\\s*", "");
+		sanitized = sanitized.replaceFirst("^\\s*\\d{1,2}\\s*[.)-:]\\s*", "");
+		sanitized = sanitized.replaceFirst("^\\s*\\d{1,2}:\\d{2}(?:\\s*[AaPp][Mm])?\\s*(?:[-:–—]\\s*)?", "");
+		sanitized = sanitized.replaceFirst("^\\s*\\d{1,2}\\s*[AaPp][Mm]\\s*(?:[-:–—]\\s*)?", "");
+		return sanitized.trim();
 	}
 
 	private Location findMentionedLocation(String description) {
@@ -1589,214 +2028,6 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		return location.isWithinBounds(agent.getX(), agent.getY());
 	}
 
-	private void advanceAgentMovement(Agent agent) {
-		Location targetLocation = resolveTargetLocation(agent);
-		if (targetLocation == null) {
-			stepAgentRoutine(agent);
-			return;
-		}
-
-		double targetX;
-		double targetY;
-		if (agent.getLocation() != null && targetLocation.getFullPath().equals(agent.getLocation().getFullPath())) {
-			targetX = snapToTileWithinBounds(targetLocation.getCenterX(), targetLocation.getMinX(), targetLocation.getMaxX());
-			targetY = snapToTileWithinBounds(targetLocation.getCenterY(), targetLocation.getMinY(), targetLocation.getMaxY());
-		} else {
-			// Choose the nearest in-bounds tile as an "entrance" point into the destination location.
-			targetX = snapToTileWithinBounds(agent.getX(), targetLocation.getMinX(), targetLocation.getMaxX());
-			targetY = snapToTileWithinBounds(agent.getY(), targetLocation.getMinY(), targetLocation.getMaxY());
-		}
-
-		stepAgentToward(agent, targetX, targetY, targetLocation);
-	}
-
-	private Location resolveTargetLocation(Agent agent) {
-		String targetName = agent.getTargetLocation();
-		if (targetName == null || targetName.isBlank()) {
-			return null;
-		}
-
-		Location target = world.getLocation(targetName).orElse(null);
-		if (target == null) {
-			agent.setTargetLocation(null);
-			return null;
-		}
-
-		// Boundary-entry semantics: as soon as the agent crosses into destination bounds,
-		// they have arrived and should transition into the activity there.
-		if (isAgentWithinLocationBounds(agent, target)) {
-			agent.setLocation(target);
-			agent.setTargetLocation(null);
-			return null;
-		}
-
-		return target;
-	}
-
-	private void stepAgentRoutine(Agent agent) {
-		Location current = agent.getLocation();
-		if (current == null) {
-			current = findLocationAt(agent.getX(), agent.getY());
-			if (current != null) {
-				agent.setLocation(current);
-			} else {
-				current = findNearestLocation(agent.getX(), agent.getY());
-				if (current == null) {
-					return;
-				}
-				agent.setLocation(current);
-			}
-		}
-
-		boolean constrainToCurrentLocation = agent.getTargetLocation() == null && current != null && !isTransitLocation(current);
-
-		int directionSeed = Math.floorMod((agent.getFullName() + SimulationTime.now().toString()).hashCode(), 4);
-		int[] directionOrder = new int[] {
-			directionSeed,
-			(directionSeed + 1) % 4,
-			(directionSeed + 2) % 4,
-			(directionSeed + 3) % 4
-		};
-
-		for (int direction : directionOrder) {
-			double nextX = agent.getX();
-			double nextY = agent.getY();
-			switch (direction) {
-				case 0:
-					nextX += TILE_SIZE;
-					break;
-				case 1:
-					nextX -= TILE_SIZE;
-					break;
-				case 2:
-					nextY += TILE_SIZE;
-					break;
-				default:
-					nextY -= TILE_SIZE;
-					break;
-			}
-
-			nextX = snapToTile(clamp(nextX, 0.0, 1800.0));
-			nextY = snapToTile(clamp(nextY, 0.0, 1200.0));
-			if (toTile(nextX) == toTile(agent.getX()) && toTile(nextY) == toTile(agent.getY())) {
-				continue;
-			}
-			if (isTileOccupiedByOtherAgent(nextX, nextY, agent)) {
-				continue;
-			}
-			if (constrainToCurrentLocation && !current.isWithinBounds(nextX, nextY)) {
-				continue;
-			}
-			agent.setPosition(nextX, nextY);
-			Location atNewPosition = findLocationAt(nextX, nextY);
-			if (atNewPosition != null) {
-				agent.setLocation(atNewPosition);
-			}
-			return;
-		}
-
-		if (constrainToCurrentLocation) {
-			return;
-		}
-
-		// Anti-stall fallback: if all four adjacent routine tiles are blocked,
-		// try to relocate to the nearest free tile in a small radius.
-		tryNudgeAgentToNearbyFreeTile(agent, 3);
-	}
-
-	private boolean isTransitLocation(Location location) {
-		if (location == null || location.getFullPath() == null) {
-			return false;
-		}
-		String lowered = location.getFullPath().toLowerCase();
-		return lowered.contains("street")
-			|| lowered.contains("road")
-			|| lowered.contains("path")
-			|| lowered.contains("sidewalk");
-	}
-
-	private Location findNearestLocation(double x, double y) {
-		Location best = null;
-		double bestDistance = Double.MAX_VALUE;
-		for (Location location : getLocationsCached()) {
-			double centerX = location.getCenterX();
-			double centerY = location.getCenterY();
-			double distance = Math.hypot(centerX - x, centerY - y);
-			if (best == null || distance < bestDistance) {
-				best = location;
-				bestDistance = distance;
-			}
-		}
-		return best;
-	}
-
-	private void stepAgentToward(Agent agent, double targetX, double targetY, Location targetLocation) {
-		int currentTileX = toTile(agent.getX());
-		int currentTileY = toTile(agent.getY());
-		int targetTileX = toTile(targetX);
-		int targetTileY = toTile(targetY);
-		if (currentTileX == targetTileX && currentTileY == targetTileY) {
-			Location locationAtCurrent = findLocationAt(agent.getX(), agent.getY());
-			if (locationAtCurrent != null) {
-				agent.setLocation(locationAtCurrent);
-				if (isAgentWithinLocationBounds(agent, targetLocation)) {
-					agent.setLocation(targetLocation);
-					agent.setTargetLocation(null);
-					if (isTrackedAgent(agent)) {
-						LOG.info("[Track:{}] arrival-at-boundary | {}", getTrackedAgentLabel(), traceAgentSnapshot(agent));
-					}
-				}
-			}
-			return;
-		}
-
-		int dx = Integer.compare(targetTileX, currentTileX);
-		int dy = Integer.compare(targetTileY, currentTileY);
-		double stepX = snapToTile(agent.getX() + (dx * TILE_SIZE));
-		double stepY = snapToTile(agent.getY() + (dy * TILE_SIZE));
-
-		boolean prioritizeX = Math.abs(targetTileX - currentTileX) >= Math.abs(targetTileY - currentTileY);
-		List<double[]> candidates = new ArrayList<>();
-		if (prioritizeX) {
-			if (dx != 0) candidates.add(new double[] { stepX, snapToTile(agent.getY()) });
-			if (dy != 0) candidates.add(new double[] { snapToTile(agent.getX()), stepY });
-		} else {
-			if (dy != 0) candidates.add(new double[] { snapToTile(agent.getX()), stepY });
-			if (dx != 0) candidates.add(new double[] { stepX, snapToTile(agent.getY()) });
-		}
-
-		for (double[] candidate : candidates) {
-			double nextX = candidate[0];
-			double nextY = candidate[1];
-			if (isTileOccupiedByOtherAgent(nextX, nextY, agent)) {
-				if (isTrackedAgent(agent)) {
-					LOG.info("[Track:{}] blocked-candidate ({}, {})", getTrackedAgentLabel(),
-						String.format("%.1f", nextX), String.format("%.1f", nextY));
-				}
-				continue;
-			}
-			agent.setPosition(nextX, nextY);
-			Location locationAtNewPosition = findLocationAt(nextX, nextY);
-			if (locationAtNewPosition != null) {
-				agent.setLocation(locationAtNewPosition);
-				if (isAgentWithinLocationBounds(agent, targetLocation)) {
-					agent.setLocation(targetLocation);
-					agent.setTargetLocation(null);
-					if (isTrackedAgent(agent)) {
-							LOG.info("[Track:{}] entered-target-bounds | {}", getTrackedAgentLabel(), traceAgentSnapshot(agent));
-					}
-				}
-			}
-			return;
-		}
-
-		// If direct path tiles are blocked, fall back to a routine step to unjam.
-		if (isTrackedAgent(agent)) {
-			LOG.info("[Track:{}] all-direct-candidates-blocked, routine-fallback | {}", getTrackedAgentLabel(), traceAgentSnapshot(agent));
-		}
-		stepAgentRoutine(agent);
-	}
-
 	private int clearNonPlayerAgents() {
 		List<String> removedNames = world.getAgents().stream()
 			.filter(agent -> !(agent instanceof Player))
@@ -1807,6 +2038,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			runtimeStateByAgent.remove(name);
 			reactiveEventsByAgent.remove(name);
 			committedActionsByAgent.remove(name);
+			agenticStateByAgent.remove(name);
 		}
 		if (removedNames.stream().anyMatch(name -> name.equalsIgnoreCase(getTrackedAgentLabel()))) {
 			setTrackedAgentName(null);
@@ -2024,48 +2256,6 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			+ "Additional theme request: " + (request.getPrompt() == null ? "none" : request.getPrompt()) + "\n"
 			+ "Original JSON candidate:\n"
 			+ rawGeneration;
-	}
-
-	private boolean tryNudgeAgentToNearbyFreeTile(Agent agent, int radiusTiles) {
-		if (agent == null) {
-			return false;
-		}
-		int baseTileX = toTile(agent.getX());
-		int baseTileY = toTile(agent.getY());
-
-		for (int radius = 1; radius <= Math.max(1, radiusTiles); radius++) {
-			for (int dx = -radius; dx <= radius; dx++) {
-				for (int dy = -radius; dy <= radius; dy++) {
-					if (Math.abs(dx) != radius && Math.abs(dy) != radius) {
-						continue;
-					}
-
-					double candidateX = snapToTile((baseTileX + dx) * TILE_SIZE);
-					double candidateY = snapToTile((baseTileY + dy) * TILE_SIZE);
-
-					candidateX = snapToTile(clamp(candidateX, 0.0, 1800.0));
-					candidateY = snapToTile(clamp(candidateY, 0.0, 1200.0));
-
-					if (toTile(candidateX) == baseTileX && toTile(candidateY) == baseTileY) {
-						continue;
-					}
-					if (isTileOccupiedByOtherAgent(candidateX, candidateY, agent)) {
-						continue;
-					}
-
-					Location location = findLocationAt(candidateX, candidateY);
-					if (location == null) {
-						continue;
-					}
-
-					agent.setPosition(candidateX, candidateY);
-					agent.setLocation(location);
-					return true;
-				}
-			}
-		}
-
-		return false;
 	}
 
 	private boolean isTileOccupiedByOtherAgent(double x, double y, Agent ignoreAgent) {

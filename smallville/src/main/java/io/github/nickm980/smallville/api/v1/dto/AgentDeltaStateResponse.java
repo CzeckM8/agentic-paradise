@@ -9,6 +9,8 @@ public class AgentDeltaStateResponse {
     private String location;
     private String currentAction;
     private String emoji;
+    private String object;
+    private String targetLocation;
     private double stressLevel;
     private String mentalState;
     private double x;
@@ -59,6 +61,22 @@ public class AgentDeltaStateResponse {
 
     public void setEmoji(String emoji) {
         this.emoji = emoji;
+    }
+
+    public String getObject() {
+        return object;
+    }
+
+    public void setObject(String object) {
+        this.object = object;
+    }
+
+    public String getTargetLocation() {
+        return targetLocation;
+    }
+
+    public void setTargetLocation(String targetLocation) {
+        this.targetLocation = targetLocation;
     }
 
     public double getStressLevel() {

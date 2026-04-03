@@ -16,6 +16,12 @@ java -jar target/smallville-1.3.0.jar --port 8080
 If the server requires an API key in your local config, run:
 `java -jar target/smallville-1.3.0.jar --api-key o --port 8080`
 
+.env file with the following param:
+GOOGLE_AI_API_KEY=YOUR-API-KEY
+LLM_PROVIDER=google_ai
+LLM_MODEL=gemma-3-27b-it (you can use any other google ai studio model)
+SERVER_PORT=8080
+
 ## Architecture
 - `GET /{x}/{y}`
 	- Returns location + nearby entities/objects at coordinate.

@@ -6,6 +6,7 @@ public class RuntimeOrchestrationRequest {
     private double awarenessRadius = 180.0;
     private boolean forceDayStart = false;
     private java.util.List<String> pinnedAgents = new java.util.ArrayList<>();
+    private java.util.List<java.util.Map<String, Object>> npcPositions = new java.util.ArrayList<>();
 
     public java.util.List<String> getPinnedAgents() {
         return pinnedAgents;
@@ -51,5 +52,13 @@ public class RuntimeOrchestrationRequest {
 
     public void setForceDayStart(boolean forceDayStart) {
         this.forceDayStart = forceDayStart;
+    }
+
+    public java.util.List<java.util.Map<String, Object>> getNpcPositions() {
+        return npcPositions;
+    }
+
+    public void setNpcPositions(java.util.List<java.util.Map<String, Object>> npcPositions) {
+        this.npcPositions = npcPositions;
     }
 }
