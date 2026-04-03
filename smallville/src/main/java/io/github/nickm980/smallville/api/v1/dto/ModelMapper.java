@@ -30,7 +30,12 @@ public class ModelMapper {
 	result.setX(agent.getX());
 	result.setY(agent.getY());
 <<<<<<< HEAD
+<<<<<<< HEAD
 	result.setTargetLocation(agent.getTargetLocation());
+=======
+	result.setActiveAction(fromAgentAction(agent.getActiveAction()));
+	result.setQueuedActions(agent.getQueuedActions().stream().map(this::fromAgentAction).toList());
+>>>>>>> 09822c1 (Add queued action system for agents)
 =======
 	result.setActiveAction(fromAgentAction(agent.getActiveAction()));
 	result.setQueuedActions(agent.getQueuedActions().stream().map(this::fromAgentAction).toList());

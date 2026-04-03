@@ -1801,6 +1801,7 @@ public class SimulationService {
     }
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 	private boolean isTrackedAgent(Agent agent) {
 		return agent != null
 			&& agent.getFullName() != null
@@ -3141,6 +3142,9 @@ public class SimulationService {
 =======
 	private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
 >>>>>>> 09822c1 (Add queued action system for agents)
+=======
+	private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
+>>>>>>> 09822c1 (Add queued action system for agents)
 	agent.applyStressChange(Math.min(0.25, event.severity * 0.02));
 	recordStressEventIfSignificant(agent, event.description);
 	agent.setCurrentActivity("processing event");
@@ -3426,6 +3430,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 
 	private void applyScheduledActivity(Agent agent) {
 <<<<<<< HEAD
+<<<<<<< HEAD
 		LocalDateTime now = SimulationTime.now();
 		List<io.github.nickm980.smallville.memory.Commitment> commitments = agent.getMemoryStream()
 			.getPlans(io.github.nickm980.smallville.memory.PlanType.COMMITMENT).stream()
@@ -3508,6 +3513,11 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			return;
 		}
 >>>>>>> 09822c1 (Add queued action system for agents)
+=======
+		if (agent.hasPendingActions()) {
+			return;
+		}
+>>>>>>> 09822c1 (Add queued action system for agents)
 		Plan currentPlan = findCurrentPlan(agent);
 		if (currentPlan == null) {
 			return;
@@ -3515,11 +3525,15 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 
 		String description = currentPlan.getDescription();
 <<<<<<< HEAD
+<<<<<<< HEAD
 		String activity = sanitizeActivityText(stripLeadingTime(description));
 		if (!activity.isBlank()) {
 			agent.setCurrentActivity(activity);
 		}
 
+=======
+		String activity = stripLeadingTime(description);
+>>>>>>> 09822c1 (Add queued action system for agents)
 =======
 		String activity = stripLeadingTime(description);
 >>>>>>> 09822c1 (Add queued action system for agents)
@@ -3602,6 +3616,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 	}
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 	private boolean isAgentWithinLocationBounds(Agent agent, Location location) {
 		if (agent == null || location == null) {
 			return false;
@@ -3677,6 +3692,59 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		completeWorldAction(agent, activeAction);
 	}
 
+=======
+	private void advanceAgentMovement(Agent agent) {
+		AgentAction activeAction = agent.getActiveAction();
+		if (activeAction == null) {
+			activeAction = agent.startNextAction();
+		}
+		if (activeAction == null) {
+			if (agent.hasBeenOrchestrated()) {
+				stepAgentRoutine(agent);
+			}
+			return;
+		}
+
+		if (activeAction.getEmoji() != null && !activeAction.getEmoji().isBlank()) {
+			agent.setCurrentEmoji(activeAction.getEmoji());
+		}
+		if (activeAction.getDescription() != null && !activeAction.getDescription().isBlank()) {
+			agent.setCurrentActivity(activeAction.getDescription());
+		}
+
+		String type = activeAction.getType() == null ? "activity" : activeAction.getType().toLowerCase();
+		if ("move".equals(type)) {
+			if (!agent.hasBeenOrchestrated()) {
+				return;
+			}
+			Location targetLocation = resolveTargetLocation(agent, activeAction);
+			if (targetLocation == null) {
+				agent.completeActiveAction();
+				return;
+			}
+			double targetX;
+			double targetY;
+			if (activeAction.getTargetX() != null && activeAction.getTargetY() != null) {
+				targetX = snapToTile(clamp(activeAction.getTargetX(), targetLocation.getMinX(), targetLocation.getMaxX()));
+				targetY = snapToTile(clamp(activeAction.getTargetY(), targetLocation.getMinY(), targetLocation.getMaxY()));
+			} else if (agent.getLocation() != null && targetLocation.getFullPath().equals(agent.getLocation().getFullPath())) {
+				targetX = snapToTile(targetLocation.getCenterX());
+				targetY = snapToTile(targetLocation.getCenterY());
+			} else {
+				targetX = snapToTile(clamp(agent.getX(), targetLocation.getMinX(), targetLocation.getMaxX()));
+				targetY = snapToTile(clamp(agent.getY(), targetLocation.getMinY(), targetLocation.getMaxY()));
+			}
+			boolean arrived = stepAgentToward(agent, targetX, targetY, targetLocation);
+			if (arrived) {
+				agent.completeActiveAction();
+			}
+			return;
+		}
+
+		completeWorldAction(agent, activeAction);
+	}
+
+>>>>>>> 09822c1 (Add queued action system for agents)
 	private Location resolveTargetLocation(Agent agent, AgentAction action) {
 		String targetName = action.getTargetLocation();
 		if (targetName == null || targetName.isBlank()) {
@@ -3726,6 +3794,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		}
 	}
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 	private String extractJsonObject(String text) {
 		if (text == null) {
@@ -3824,6 +3893,8 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 				}
 			}
 =======
+=======
+>>>>>>> 09822c1 (Add queued action system for agents)
 	private boolean stepAgentToward(Agent agent, double targetX, double targetY, Location targetLocation) {
 		int currentTileX = toTile(agent.getX());
 		int currentTileY = toTile(agent.getY());
@@ -3838,6 +3909,9 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 				}
 			}
 			return true;
+<<<<<<< HEAD
+>>>>>>> 09822c1 (Add queued action system for agents)
+=======
 >>>>>>> 09822c1 (Add queued action system for agents)
 		}
 		return new ArrayList<>(sanitized.stream().limit(Math.max(min, max)).collect(Collectors.toList()));
@@ -3875,11 +3949,15 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 				}
 			}
 			return false;
+<<<<<<< HEAD
+>>>>>>> 09822c1 (Add queued action system for agents)
+=======
 >>>>>>> 09822c1 (Add queued action system for agents)
 		}
 		return false;
 	}
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 	private Location resolveGeneratedAgentLocation(String proposedLocation, GenerateAgentRequest request, List<Location> locations) {
 		Location exact = findLocationByName(proposedLocation, locations);
@@ -3944,6 +4022,8 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			+ "Original JSON candidate:\n"
 			+ rawGeneration;
 =======
+=======
+>>>>>>> 09822c1 (Add queued action system for agents)
 	private void completeWorldAction(Agent agent, AgentAction action) {
 		String type = action.getType() == null ? "activity" : action.getType().toLowerCase();
 		if ("pickup".equals(type) && action.getItem() != null && agent instanceof Player player) {
@@ -3959,6 +4039,9 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			agent.setCurrentActivity(action.getDescription());
 		}
 		agent.completeActiveAction();
+<<<<<<< HEAD
+>>>>>>> 09822c1 (Add queued action system for agents)
+=======
 >>>>>>> 09822c1 (Add queued action system for agents)
 	}
 
