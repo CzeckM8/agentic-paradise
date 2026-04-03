@@ -7,9 +7,8 @@ var agent_name = ""
 var current_activity = ""
 var current_location = ""
 
-# For smooth movement
+# Per-turn discrete positioning (no smooth lerp — turn-based like Elin/Stone Shard)
 var target_position = Vector2.ZERO
-var move_speed = 200.0  # pixels per second
 var has_initial_position = false
 
 func _ready():
@@ -19,10 +18,8 @@ func _ready():
 	label.add_theme_font_size_override("font_size", 12)
 	target_position = position
 
-func _process(delta):
-	# Smooth movement towards target position
-	if position.distance_to(target_position) > 5:
-		position = position.move_toward(target_position, move_speed * delta)
+func _process(_delta):
+	pass  # Position is set directly on each turn — no per-frame lerp
 
 func update_from_backend(data, location_map, preset_position: Vector2 = Vector2.ZERO):
 	"""Update agent based on backend data.
@@ -56,10 +53,9 @@ func update_from_backend(data, location_map, preset_position: Vector2 = Vector2.
 	# Update color based on activity keywords
 	_update_appearance()
 
-	# On first backend sync, spawn exactly at resolved coordinates (no fly-in).
-	if not has_initial_position:
-		position = target_position
-		has_initial_position = true
+	# Always snap to authoritative position — discrete turn-based movement.
+	position = target_position
+	has_initial_position = true
 
 func _update_label():
 	"""Update the text label above the agent"""

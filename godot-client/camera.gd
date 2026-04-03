@@ -11,10 +11,12 @@ var max_pos = Vector2(1800, 1200)
 var player = null
 var player_lookup_cooldown = 0.5
 var player_lookup_timer = 0.0
+var backend_connector = null
 
 func _ready():
 	# Set initial zoom
 	zoom = Vector2(0.8, 0.8)  # Slightly zoomed out to see more
+	backend_connector = get_node_or_null("../BackendConnector")
 	call_deferred("_find_player")
 
 func _find_player():
@@ -62,8 +64,11 @@ func _process(delta):
 	position.y = clamp(position.y, min_pos.y, max_pos.y)
 
 func _input(event):
-	# Zoom with mouse wheel
+	# Zoom with mouse wheel — disabled entirely while dialogue is open so the
+	# dialogue log can scroll without also zooming the camera.
 	if event is InputEventMouseButton:
+		if backend_connector != null and backend_connector.is_dialogue_open():
+			return
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			zoom += Vector2(zoom_speed, zoom_speed)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
