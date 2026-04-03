@@ -1,5 +1,8 @@
 package io.github.nickm980.smallville.entities;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 
 import io.github.nickm980.smallville.memory.Characteristic;
@@ -23,6 +26,8 @@ public class Agent {
     private double x = 0.0;
     private double y = 0.0;
     private boolean hasBeenOrchestrated = false; // Prevents movement on first turn after creation
+    private final Deque<AgentAction> actionQueue = new ArrayDeque<>();
+    private AgentAction activeAction;
     
     public Agent(String name, List<Characteristic> characteristics, String currentAction, Location location) {
 	this.name = name;
@@ -188,5 +193,78 @@ public class Agent {
 
     public void setHasBeenOrchestrated(boolean orchestrated) {
 	this.hasBeenOrchestrated = orchestrated;
+    }
+
+    public AgentAction getActiveAction() {
+        return activeAction == null ? null : activeAction.copy();
+    }
+
+    public List<AgentAction> getQueuedActions() {
+        return actionQueue.stream().map(AgentAction::copy).toList();
+    }
+
+    public List<AgentAction> getPendingActions() {
+        List<AgentAction> actions = new ArrayList<>();
+        if (activeAction != null) {
+            actions.add(activeAction.copy());
+        }
+        actions.addAll(getQueuedActions());
+        return actions;
+    }
+
+    public boolean hasPendingActions() {
+        return activeAction != null || !actionQueue.isEmpty();
+    }
+
+    public void enqueueAction(AgentAction action) {
+        if (action == null) {
+            return;
+        }
+        action.setStatus("queued");
+        actionQueue.addLast(action);
+    }
+
+    public void enqueueActions(List<AgentAction> actions) {
+        if (actions == null) {
+            return;
+        }
+        for (AgentAction action : actions) {
+            enqueueAction(action);
+        }
+    }
+
+    public void replaceActionQueue(List<AgentAction> actions) {
+        activeAction = null;
+        actionQueue.clear();
+        targetLocation = null;
+        enqueueActions(actions);
+    }
+
+    public AgentAction startNextAction() {
+        if (activeAction != null) {
+            return activeAction.copy();
+        }
+        activeAction = actionQueue.pollFirst();
+        if (activeAction != null) {
+            activeAction.setStatus("in_progress");
+        }
+        return getActiveAction();
+    }
+
+    public AgentAction completeActiveAction() {
+        if (activeAction == null) {
+            return null;
+        }
+        AgentAction completed = activeAction.copy();
+        completed.setStatus("completed");
+        activeAction = null;
+        targetLocation = null;
+        return completed;
+    }
+
+    public void clearActions() {
+        activeAction = null;
+        actionQueue.clear();
+        targetLocation = null;
     }
 }

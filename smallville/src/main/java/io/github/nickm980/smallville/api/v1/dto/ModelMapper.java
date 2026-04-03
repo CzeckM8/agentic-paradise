@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import io.github.nickm980.smallville.entities.AgentAction;
 import io.github.nickm980.smallville.entities.Agent;
 import io.github.nickm980.smallville.entities.Conversation;
 import io.github.nickm980.smallville.entities.Dialog;
@@ -28,7 +29,12 @@ public class ModelMapper {
 	result.setName(agent.getFullName());
 	result.setX(agent.getX());
 	result.setY(agent.getY());
+<<<<<<< HEAD
 	result.setTargetLocation(agent.getTargetLocation());
+=======
+	result.setActiveAction(fromAgentAction(agent.getActiveAction()));
+	result.setQueuedActions(agent.getQueuedActions().stream().map(this::fromAgentAction).toList());
+>>>>>>> 09822c1 (Add queued action system for agents)
 	return result;
     }
 
@@ -42,6 +48,25 @@ public class ModelMapper {
 	result.setEmoji(agent.getEmoji());
 	result.setStressLevel(agent.getStressLevel());
 	result.setMentalState(agent.getMentalState());
+	return result;
+    }
+
+    public AgentActionStateResponse fromAgentAction(AgentAction action) {
+	if (action == null) {
+	    return null;
+	}
+	AgentActionStateResponse result = new AgentActionStateResponse();
+	result.setId(action.getId());
+	result.setType(action.getType());
+	result.setDescription(action.getDescription());
+	result.setEmoji(action.getEmoji());
+	result.setTargetLocation(action.getTargetLocation());
+	result.setTargetAgent(action.getTargetAgent());
+	result.setItem(action.getItem());
+	result.setSpeakText(action.getSpeakText());
+	result.setTargetX(action.getTargetX());
+	result.setTargetY(action.getTargetY());
+	result.setStatus(action.getStatus());
 	return result;
     }
 
