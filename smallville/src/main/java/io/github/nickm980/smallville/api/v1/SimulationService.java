@@ -1841,10 +1841,42 @@ public class SimulationService {
 		packet.put("self", self);
 		packet.put("nearbyAgents", nearbyAgents);
 		packet.put("committedActions", commitments);
+		String replyStyle = buildPersonalityReplyStyle(agent);
 
 		return "You must stay consistent with committed actions and current world state. "
 			+ "Here is a compact environment packet: " + packet.toString()
+			+ "\nReply style constraints: " + replyStyle
+			+ "\nRespond in 1-2 sentences, in-character, with no markdown or role labels."
 			+ "\nPlayer says: " + playerQuestion;
+	}
+
+	private String buildPersonalityReplyStyle(Agent agent) {
+		if (agent == null) {
+			return "neutral, concise, and grounded";
+		}
+
+		List<String> tones = new ArrayList<>();
+		if (agent.getFearfulness() >= 0.7) {
+			tones.add("cautious");
+		}
+		if (agent.getSocialDominance() >= 0.7) {
+			tones.add("assertive");
+		}
+		if (agent.getCompassion() >= 0.65) {
+			tones.add("warm");
+		}
+		if (agent.getImpulsivity() >= 0.7) {
+			tones.add("energetic");
+		}
+		if (agent.getAggression() >= 0.7) {
+			tones.add("blunt");
+		}
+
+		if (tones.isEmpty()) {
+			tones.add("calm");
+		}
+
+		return String.join(", ", tones);
 	}
 
 private static final double STRESS_MEMORY_THRESHOLD = 0.5;
