@@ -694,7 +694,7 @@ public class SimulationService {
 			player.setCurrentActivity(request.getActionDescription() != null ? request.getActionDescription() : "Interacted");
 			// Attack uses high severity (9) so the target always reacts via LLM.
 			// Basic interact uses severity 4 so the event is recorded deterministically
-			// without blocking the turn with an LLM call â€” dialogue content comes from speak actions.
+			// without blocking the turn with an LLM call - dialogue content comes from speak actions.
 			int eventSeverity = "attack".equalsIgnoreCase(request.getActionType()) ? 9 : 4;
 			enqueueReactiveEvent(targetAgent.getFullName(),
 			    request.getActionDescription() != null ? request.getActionDescription() : "direct interaction",
