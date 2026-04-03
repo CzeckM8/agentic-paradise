@@ -4,6 +4,7 @@ import static io.github.nickm980.smallville.api.SmallvilleServer.exists;
 
 import java.io.StringWriter;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.List;
@@ -59,7 +60,7 @@ public final class SimulationController {
     }
 
     @Post("/memories/stream/{uuid}")
-    public void saveMemory(Context ctx, @Param String uuidStr) {
+	public void saveMemory(Context ctx, @Param("uuid") String uuidStr) {
 	UUID uuid = UUID.fromString(uuidStr);
 
 	Map<String, String> dataMap = gson.fromJson(ctx.body(), new TypeToken<Map<String, String>>() {
@@ -72,7 +73,7 @@ public final class SimulationController {
     }
 
     @Get("/memories/{name}")
-    public void getMemoryByName(Context ctx, @Param String name) {
+	public void getMemoryByName(Context ctx, @Param("name") String name) {
 	Map<String, Object> model = new HashMap<>();
 	model.put("memories", service.getMemoriesOfAgent(name));
 
@@ -97,34 +98,35 @@ public final class SimulationController {
     }
 
     @Get("/agents/{name}")
-    public void getAgentsByName(Context ctx, @Param String name) {
+	public void getAgentsByName(Context ctx, @Param("name") String name) {
 	AgentStateResponse res = service.getAgentState(name);
 	ctx.json(res);
     }
 
 	@Get("/agents/{name}/memories/summary")
-	public void getAgentMemorySummary(Context ctx, @Param String name) {
+	public void getAgentMemorySummary(Context ctx, @Param("name") String name) {
 	ctx.json(service.getAgentMemorySummary(name));
 	}
 
 	@Get("/agents/{name}/memories/recent")
-	public void getAgentMemoryRecent(Context ctx, @Param String name) {
+	public void getAgentMemoryRecent(Context ctx, @Param("name") String name) {
 	int limit = parseLimit(ctx, 20);
 	ctx.json(Map.of("memories", service.getAgentMemoriesRecent(name, limit)));
 	}
 
 	@Get("/agents/{name}/memories/{index}")
-	public void getAgentMemoryByIndex(Context ctx, @Param String name, @Param int index) {
+	public void getAgentMemoryByIndex(Context ctx, @Param("name") String name, @Param("index") int index) {
 	ctx.json(service.getAgentMemoryByIndex(name, index));
 	}
 
 	@Get("/agents/{name}/schedule")
-	public void getAgentSchedule(Context ctx, @Param String name) {
+	public void getAgentSchedule(Context ctx, @Param("name") String name) {
 	List<ScheduleResponse> schedule = service.getAgentSchedule(name);
 	Map<String, Object> byType = new HashMap<>();
 	byType.put("shortTerm", schedule.stream().filter(item -> "SHORT_TERM".equals(item.getType())).toList());
 	byType.put("midTerm", schedule.stream().filter(item -> "MID_TERM".equals(item.getType())).toList());
 	byType.put("longTerm", schedule.stream().filter(item -> "LONG_TERM".equals(item.getType())).toList());
+	byType.put("commitments", schedule.stream().filter(item -> "COMMITMENT".equals(item.getType())).toList());
 	ctx.json(Map.of("agentName", name, "items", schedule, "byType", byType));
 	}
 
@@ -165,6 +167,17 @@ public final class SimulationController {
 	    throw e;
 	}
     }
+
+	@Post("/agents/generate")
+	public void generateAgent(Context ctx) {
+		try {
+			GenerateAgentRequest request = ctx.body().isBlank() ? new GenerateAgentRequest() : ctx.bodyAsClass(GenerateAgentRequest.class);
+			ctx.json(Map.of("success", true, "result", service.generateAndSpawnAgents(request)));
+		} catch (Exception e) {
+			LOG.error("[SERVER] Error generating agent: {}", e.getMessage(), e);
+			ctx.status(400).json(Map.of("success", false, "error", e.getMessage()));
+		}
+	}
 
     @Post("/locations")
     public void createLocation(Context ctx) {
@@ -207,7 +220,7 @@ public final class SimulationController {
     }
 
     @Get("/player/{name}")
-    public void getPlayer(Context ctx, @Param String name) {
+	public void getPlayer(Context ctx, @Param("name") String name) {
 	PlayerStateResponse res = service.getPlayerState(name);
 	ctx.json(res);
     }
@@ -230,7 +243,7 @@ public final class SimulationController {
     }
 
     @Get("/player/{name}/actions")
-    public void getPlayerActionHistory(Context ctx, @Param String name) {
+	public void getPlayerActionHistory(Context ctx, @Param("name") String name) {
 	int limit = parseLimit(ctx, 20);
 	ctx.json(Map.of("actions", service.getPlayerActionHistory(name, limit)));
     }
@@ -280,7 +293,7 @@ public final class SimulationController {
     }
 
 	@Post("/objects/types/{type}")
-	public void defineObjectType(Context ctx, @Param String type) {
+	public void defineObjectType(Context ctx, @Param("type") String type) {
 	ObjectTypeDefinitionRequest request = ctx.bodyAsClass(ObjectTypeDefinitionRequest.class);
 	service.defineObjectType(type, request.getProperties());
 	ctx.json(Map.of("success", true, "type", type));
@@ -292,18 +305,18 @@ public final class SimulationController {
 	}
 
 	@Get("/objects/types/{type}")
-	public void getObjectType(Context ctx, @Param String type) {
+	public void getObjectType(Context ctx, @Param("type") String type) {
 	ctx.json(service.getObjectType(type));
 	}
 
 	@Post("/objects/{id}")
-	public void upsertObjectInstance(Context ctx, @Param String id) {
+	public void upsertObjectInstance(Context ctx, @Param("id") String id) {
 	ObjectInstanceUpsertRequest request = ctx.bodyAsClass(ObjectInstanceUpsertRequest.class);
 	ctx.json(service.upsertObjectInstance(id, request));
 	}
 
 	@Get("/objects/{id}")
-	public void getObjectInstance(Context ctx, @Param String id) {
+	public void getObjectInstance(Context ctx, @Param("id") String id) {
 	ctx.json(service.getObjectInstance(id));
 	}
 
@@ -311,6 +324,16 @@ public final class SimulationController {
 	public void getObjectInstances(Context ctx) {
 	ctx.json(Map.of("objects", service.getAllObjectInstances()));
 	}
+
+    @Post("/world/bootstrap")
+    public void bootstrapSchedules(Context ctx) {
+	try {
+	    Map<String, Object> result = service.bootstrapSchedules();
+	    ctx.json(Map.of("success", true, "result", result));
+	} catch (Exception e) {
+	    ctx.status(500).json(Map.of("success", false, "error", e.getMessage()));
+	}
+    }
 
     @Post("/turn")
     public void processTurn(Context ctx) {
@@ -320,8 +343,9 @@ public final class SimulationController {
 	    List<AgentStateResponse> agents = service.getAgents();
 	    List<LocationStateResponse> locations = service.getAllLocations();
 	    List<ConversationResponse> conversations = service.getConversations();
+	    String time = SimulationTime.now().format(DateTimeFormatter.ofPattern("h:mm a"));
 
-	    ctx.json(Map.of("actionResult", response, "runtimeRequest", runtimeRequest, "agents", agents, "location_states", locations, "conversations", conversations));
+	    ctx.json(Map.of("actionResult", response, "runtimeRequest", runtimeRequest, "agents", agents, "location_states", locations, "conversations", conversations, "time", time));
 	} catch (Exception e) {
 	    ctx.status(400).json(Map.of("success", false, "error", e.getMessage()));
 	}
@@ -333,8 +357,9 @@ public final class SimulationController {
 	List<AgentStateResponse> agents = service.getAgents();
 	List<LocationStateResponse> locations = service.getAllLocations();
 	List<ConversationResponse> conversations = service.getConversations();
+	String time = SimulationTime.now().format(DateTimeFormatter.ofPattern("h:mm a"));
 
-	ctx.json(Map.of("agents", agents, "location_states", locations, "conversations", conversations));
+	ctx.json(Map.of("agents", agents, "location_states", locations, "conversations", conversations, "time", time));
     }
 
     @Get("/state")
@@ -342,16 +367,18 @@ public final class SimulationController {
 	List<AgentStateResponse> agents = service.getAgents();
 	List<LocationStateResponse> locations = service.getAllLocations();
 	List<ConversationResponse> conversations = service.getConversations();
+	String time = SimulationTime.now().format(DateTimeFormatter.ofPattern("h:mm a"));
 
-	ctx.json(Map.of("agents", agents, "location_states", locations, "conversations", conversations));
+	ctx.json(Map.of("agents", agents, "location_states", locations, "conversations", conversations, "time", time));
     }
 
     @Get("/state/delta")
     public void getStateDelta(Context ctx) {
 	List<AgentDeltaStateResponse> agentDeltas = service.getAgentDeltas();
 	List<LocationStateResponse> locations = service.getAllLocations();
+	String time = SimulationTime.now().format(DateTimeFormatter.ofPattern("h:mm a"));
 
-	ctx.json(Map.of("agents", agentDeltas, "location_states", locations));
+	ctx.json(Map.of("agents", agentDeltas, "location_states", locations, "time", time));
     }
 
     @Get("/llm/policy")
@@ -376,7 +403,7 @@ public final class SimulationController {
 	}
 
     @Get("/{x}/{y}")
-    public void getCoordinateSnapshot(Context ctx, @Param String x, @Param String y) {
+	public void getCoordinateSnapshot(Context ctx, @Param("x") String x, @Param("y") String y) {
 	try {
 	    double xCoord = Double.parseDouble(x);
 	    double yCoord = Double.parseDouble(y);
@@ -387,7 +414,7 @@ public final class SimulationController {
     }
 
     @Get("/{x}/{y}/location")
-    public void getLocationAtCoordinate(Context ctx, @Param String x, @Param String y) {
+	public void getLocationAtCoordinate(Context ctx, @Param("x") String x, @Param("y") String y) {
 	try {
 	    double xCoord = Double.parseDouble(x);
 	    double yCoord = Double.parseDouble(y);
@@ -398,7 +425,7 @@ public final class SimulationController {
     }
 
     @Get("/{x}/{y}/objects")
-    public void getObjectsAtCoordinate(Context ctx, @Param String x, @Param String y) {
+	public void getObjectsAtCoordinate(Context ctx, @Param("x") String x, @Param("y") String y) {
 	try {
 	    double xCoord = Double.parseDouble(x);
 	    double yCoord = Double.parseDouble(y);
@@ -414,6 +441,13 @@ public final class SimulationController {
 	int minutes = Integer.valueOf(request.getNumOfMinutes());
 	SimulationTime.setStep(Duration.ofMinutes(minutes));
 	ctx.json(Map.of("success", true, "message", "Timestep updated to " + minutes + " per update"));
+    }
+
+    @Post("/time/reset-to-noon")
+    public void resetSimulationTimeToNoon(Context ctx) {
+	LocalDateTime noon = LocalDateTime.now().withHour(12).withMinute(0).withSecond(0).withNano(0);
+	SimulationTime.setSimulationTime(noon);
+	ctx.json(Map.of("success", true, "time", noon.format(DateTimeFormatter.ofPattern("h:mm a"))));
     }
 
     private int parseLimit(Context ctx, int defaultValue) {

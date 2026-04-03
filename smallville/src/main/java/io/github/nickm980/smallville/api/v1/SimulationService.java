@@ -9,9 +9,11 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -19,6 +21,8 @@ import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.github.nickm980.smallville.World;
 import io.github.nickm980.smallville.api.v1.dto.*;
@@ -38,6 +42,11 @@ public class SimulationService {
 
     private Logger LOG = LoggerFactory.getLogger(SimulationService.class);
 	private static final double TILE_SIZE = 32.0;
+	private static final String DEFAULT_TRACKED_AGENT_NAME = "Alex";
+	private static final long TRACK_HEARTBEAT_MINUTES = 5;
+	private static final double TRACE_POSITION_EPSILON = 0.1;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private volatile String trackedAgentName = DEFAULT_TRACKED_AGENT_NAME;
 
     private final ModelMapper mapper;
     private final UpdateService prompts;
@@ -46,6 +55,7 @@ public class SimulationService {
     private final Queue<PlayerActionRequest> actionQueue = new ConcurrentLinkedQueue<>();
 	private static final int MAX_ACTION_HISTORY = 100;
 	private static final int MAX_REACTIVE_EVENTS = 30;
+	private static final int MAX_COMMITTED_ACTIONS = 20;
 	private List<LocationStateResponse> cachedLocations = null;
 	private List<Location> cachedLocationEntities = null;
 	private final Map<String, Deque<PlayerActionRequest>> actionHistoryByPlayer = new ConcurrentHashMap<>();
@@ -53,6 +63,7 @@ public class SimulationService {
 	private final Map<String, WorldObjectInstance> objectInstances = new ConcurrentHashMap<>();
 	private final Map<String, RuntimeAgentState> runtimeStateByAgent = new ConcurrentHashMap<>();
 	private final Map<String, Deque<ReactiveEvent>> reactiveEventsByAgent = new ConcurrentHashMap<>();
+	private final Map<String, Deque<CommittedAction>> committedActionsByAgent = new ConcurrentHashMap<>();
 
 	private static class RuntimeAgentState {
 		private LocalDate lastRoutineDate;
@@ -60,6 +71,12 @@ public class SimulationService {
 		private LocalDateTime lastLlmCallAt;
 		private LocalDateTime lastOrchestratedAt;
 		private boolean lastAware;
+		private String lastTraceActivity;
+		private String lastTraceLocation;
+		private String lastTraceTarget;
+		private Double lastTraceX;
+		private Double lastTraceY;
+		private LocalDateTime lastTraceLoggedAt;
 	}
 
 	private static class ReactiveEvent {
@@ -67,6 +84,23 @@ public class SimulationService {
 		private int severity;
 		private LocalDateTime createdAt;
 		private boolean playerInvolved;
+	}
+
+	private static class CommittedAction {
+		private String action;
+		private String reason;
+		private String location;
+		private double x;
+		private double y;
+		private LocalDateTime createdAt;
+	}
+
+	private static class InstinctDecision {
+		private String action;
+		private String activity;
+		private String targetLocation;
+		private double stressDelta;
+		private String reason;
 	}
 
 	private static class WorldObjectInstance {
@@ -181,6 +215,9 @@ public class SimulationService {
 	Agent agent = new Agent(request.getName(), characteristics, request.getActivity(), location);
 
 	if (world.create(agent)) {
+	    if (shouldAutoTrackNewAgent()) {
+		setTrackedAgentName(agent.getFullName());
+	    }
 	    String traits = prompts.createTraitsWithCharacteristics(agent);
 	    agent.setTraits(traits);
 	    RuntimeAgentState state = runtimeStateByAgent.computeIfAbsent(agent.getFullName(), k -> new RuntimeAgentState());
@@ -189,6 +226,73 @@ public class SimulationService {
 	    state.lastLlmCallAt = SimulationTime.now();
 	}
     }
+
+	public Map<String, Object> generateAndSpawnAgents(GenerateAgentRequest request) {
+		GenerateAgentRequest safeRequest = request == null ? new GenerateAgentRequest() : request;
+		int count = safeRequest.getCount() == null ? 1 : Math.max(1, Math.min(3, safeRequest.getCount()));
+		boolean replaceExistingAgents = safeRequest.getReplaceExistingAgents() == null || safeRequest.getReplaceExistingAgents();
+		boolean trackFirstAgent = safeRequest.getTrackFirstAgent() == null || safeRequest.getTrackFirstAgent();
+		boolean enableRepairPass = safeRequest.getEnableRepairPass() == null || safeRequest.getEnableRepairPass();
+
+		List<Location> locations = getLocationsCached();
+		if (locations.isEmpty()) {
+			throw new SmallvilleException("Create locations before generating agents");
+		}
+
+		int removedAgents = 0;
+		if (replaceExistingAgents) {
+			removedAgents = clearNonPlayerAgents();
+		}
+
+		Set<String> existingNames = world.getAgents().stream()
+			.map(Agent::getFullName)
+			.collect(Collectors.toCollection(LinkedHashSet::new));
+		List<Map<String, Object>> createdAgents = new ArrayList<>();
+
+		for (int index = 0; index < count; index++) {
+			String rawGeneration = prompts.sendRawPrompt(
+				buildAgentGenerationPrompt(safeRequest, index, locations, existingNames),
+				0.85);
+			GeneratedAgentBlueprint candidate = parseGeneratedAgentBlueprint(rawGeneration);
+			List<String> validationIssues = new ArrayList<>();
+			GeneratedAgentBlueprint normalized = validateAndNormalizeGeneratedAgent(candidate, safeRequest, existingNames, locations, validationIssues, index);
+			boolean repaired = false;
+
+			if (!validationIssues.isEmpty() && enableRepairPass) {
+				String rawRepair = prompts.sendRawPrompt(
+					buildAgentRepairPrompt(rawGeneration, validationIssues, safeRequest, locations, existingNames),
+					0.25);
+				GeneratedAgentBlueprint repairedCandidate = parseGeneratedAgentBlueprint(rawRepair);
+				List<String> repairIssues = new ArrayList<>();
+				normalized = validateAndNormalizeGeneratedAgent(repairedCandidate, safeRequest, existingNames, locations, repairIssues, index);
+				validationIssues = repairIssues;
+				repaired = true;
+			}
+
+			CreateAgentRequest createRequest = toCreateAgentRequest(normalized);
+			createAgent(createRequest);
+			existingNames.add(normalized.getName());
+
+			Map<String, Object> created = new LinkedHashMap<>();
+			created.put("agent", normalized.toMap());
+			created.put("repaired", repaired);
+			created.put("warnings", validationIssues);
+			createdAgents.add(created);
+		}
+
+		if (trackFirstAgent && !createdAgents.isEmpty()) {
+			@SuppressWarnings("unchecked")
+			Map<String, Object> firstAgent = (Map<String, Object>) createdAgents.get(0).get("agent");
+			setTrackedAgentName((String) firstAgent.get("name"));
+		}
+
+		Map<String, Object> result = new LinkedHashMap<>();
+		result.put("removedAgents", removedAgents);
+		result.put("generatedCount", createdAgents.size());
+		result.put("trackedAgent", trackedAgentName);
+		result.put("agents", createdAgents);
+		return result;
+	}
 
     public void createLocation(CreateLocationRequest request) {
 	// Check if location already exists
@@ -205,6 +309,8 @@ public class SimulationService {
 	location.setMaxY(request.getMaxY());
 	
 	world.create(location);
+	cachedLocations = null;
+	cachedLocationEntities = null;
 	LOG.info("[SERVER] Created location: {} with type: {} bounds: ({},{}) to ({},{})", 
 	    request.getName(), request.getType(), request.getMinX(), request.getMinY(), 
 	    request.getMaxX(), request.getMaxY());
@@ -376,11 +482,24 @@ public class SimulationService {
 	public PlayerActionResponse processNextAction(RuntimeOrchestrationRequest orchestrationRequest) throws SmallvilleException {
 		PlayerActionRequest request = actionQueue.poll();
 		if (request == null) {
-			return new PlayerActionResponse(false, "No actions in queue");
+			SimulationTime.update();
+			if (orchestrationRequest == null) {
+				orchestrationRequest = new RuntimeOrchestrationRequest();
+			}
+			Map<String, Object> runtimeSummary = orchestrateRuntime(orchestrationRequest);
+			PlayerActionResponse noActionResponse = new PlayerActionResponse(false, "No actions in queue");
+			noActionResponse.setResult("Turn advanced without queued player action | runtime=" + runtimeSummary);
+			return noActionResponse;
 		}
 
-		PlayerActionResponse response = executeAction(request);
-		// After executing the action, advance time and orchestrate with player-awareness context.
+		PlayerActionResponse response;
+		try {
+			response = executeAction(request);
+		} catch (Exception e) {
+			response = new PlayerActionResponse(false, e.getMessage() == null ? "Action failed" : e.getMessage());
+		}
+
+		// Each consumed player action advances simulation time by one step.
 		SimulationTime.update();
 		if (orchestrationRequest == null) {
 			orchestrationRequest = new RuntimeOrchestrationRequest();
@@ -394,9 +513,15 @@ public class SimulationService {
 		if (orchestrationRequest.getAwarenessRadius() <= 0) {
 			orchestrationRequest.setAwarenessRadius(180.0);
 		}
+		if (request.getTargetAgent() != null && !request.getTargetAgent().isBlank()) {
+			String type = request.getActionType() == null ? "" : request.getActionType().toLowerCase();
+			if ("interact".equals(type) || "speak".equals(type) || "talk".equals(type) || "wait".equals(type)) {
+				orchestrationRequest.addPinnedAgent(request.getTargetAgent());
+			}
+		}
 		Map<String, Object> runtimeSummary = orchestrateRuntime(orchestrationRequest);
 		if (response.getResult() == null || response.getResult().isBlank()) {
-			response.setResult("Turn processed");
+			response.setResult(response.isSuccess() ? "Turn processed" : "Turn processed with failed player action");
 		}
 		response.setResult(response.getResult() + " | runtime=" + runtimeSummary);
 		return response;
@@ -416,29 +541,53 @@ public class SimulationService {
 		PlayerActionResponse res = new PlayerActionResponse(true, "Action executed");
 		res.setActionId(java.util.UUID.randomUUID().toString());
 
+		if ("wait".equalsIgnoreCase(request.getActionType())) {
+			String waitActivity = request.getActionDescription() != null && !request.getActionDescription().isBlank()
+				? request.getActionDescription()
+				: "Waiting";
+			player.setCurrentActivity(waitActivity);
+			player.applyStressChange(-0.02);
+			recordCommittedAction(player, "WAIT", "player requested wait");
+
+			if (request.getTargetAgent() != null && !request.getTargetAgent().isBlank()) {
+				Agent targetAgent = world.getAgent(request.getTargetAgent())
+					.orElseThrow(() -> new AgentNotFoundException(request.getTargetAgent()));
+				targetAgent.setCurrentActivity("Waiting");
+				targetAgent.setTargetLocation(null);
+				recordCommittedAction(targetAgent, "WAIT", "waiting due to player request");
+				res.setTargetAgentState(mapper.fromAgent(targetAgent));
+			}
+
+			res.setPlayerState(mapper.fromAgent(player));
+			res.setStressChange(-0.02);
+			res.setResult("Wait action processed");
+			return res;
+		}
+
 		if ("move".equalsIgnoreCase(request.getActionType())) {
 			if (request.getTargetLocation() == null) {
 				throw new SmallvilleException("targetLocation required for move");
 			}
-			world.getLocation(request.getTargetLocation()).ifPresentOrElse(loc -> {
-				// Validate target position is within location bounds
-				double targetX = request.getPlayerX();
-				double targetY = request.getPlayerY();
-				if (!loc.isWithinBounds(targetX, targetY)) {
+			double targetX = request.getPlayerX();
+			double targetY = request.getPlayerY();
+			Location resolvedByCoordinate = findLocationAt(targetX, targetY);
+			Location destination = resolvedByCoordinate;
+			if (destination == null) {
+				destination = world.getLocation(request.getTargetLocation())
+					.orElseThrow(() -> new LocationNotFoundException(request.getTargetLocation()));
+				if (!destination.isWithinBounds(targetX, targetY)) {
 					throw new SmallvilleException("Target position (" + targetX + ", " + targetY + ") is outside location bounds");
 				}
+			}
 
-				Agent occupant = findOccupyingAgentAtTile(loc, targetX, targetY, player);
-				if (occupant != null) {
-					throw new SmallvilleException("Target tile is occupied by " + occupant.getFullName());
-				}
+			Agent occupant = findOccupyingAgentAtTile(destination, targetX, targetY, player);
+			if (occupant != null) {
+				throw new SmallvilleException("Target tile is occupied by " + occupant.getFullName());
+			}
 
-				player.setLocation(loc);
-				player.setPosition(targetX, targetY);
-				player.setCurrentActivity("Moving to " + loc.getFullPath());
-			}, () -> {
-				throw new LocationNotFoundException(request.getTargetLocation());
-			});
+			player.setLocation(destination);
+			player.setPosition(targetX, targetY);
+			player.setCurrentActivity("Moving to " + destination.getFullPath());
 
 			res.setPlayerState(mapper.fromAgent(player));
 			res.setStressChange(0);
@@ -473,12 +622,17 @@ public class SimulationService {
 			// apply stress change to target based on intensity and duration
 			double stressDelta = intensity * 0.2;
 			targetAgent.applyStressChange(stressDelta);
+			recordStressEventIfSignificant(targetAgent,
+				(request.getActionDescription() != null ? request.getActionDescription() : "player action"));
 			// player also experiences stress when committing aggressive acts
 			player.applyStressChange(intensity * 0.05);
 
 			targetAgent.setCurrentActivity(request.getActionDescription() != null ? request.getActionDescription() : "Interacted");
 			player.setCurrentActivity(request.getActionDescription() != null ? request.getActionDescription() : "Interacted");
-			int eventSeverity = "attack".equalsIgnoreCase(request.getActionType()) ? 9 : 6;
+			// Attack uses high severity (9) so the target always reacts via LLM.
+			// Basic interact uses severity 4 so the event is recorded deterministically
+			// without blocking the turn with an LLM call — dialogue content comes from speak actions.
+			int eventSeverity = "attack".equalsIgnoreCase(request.getActionType()) ? 9 : 4;
 			enqueueReactiveEvent(targetAgent.getFullName(),
 			    request.getActionDescription() != null ? request.getActionDescription() : "direct interaction",
 			    eventSeverity,
@@ -489,7 +643,8 @@ public class SimulationService {
 			    }
 			    if (bystander.getLocation() != null && targetAgent.getLocation() != null
 				&& bystander.getLocation().getFullPath().equals(targetAgent.getLocation().getFullPath())) {
-				enqueueReactiveEvent(bystander.getFullName(), "witnessed: " + (request.getActionDescription() == null ? "interaction" : request.getActionDescription()), 5, true);
+				// Severity 3 = deterministic only, no LLM stall for bystanders
+				enqueueReactiveEvent(bystander.getFullName(), "witnessed: " + (request.getActionDescription() == null ? "interaction" : request.getActionDescription()), 3, true);
 			    }
 			}
 
@@ -505,6 +660,13 @@ public class SimulationService {
 			// speaking: minor stress impacts, record as conversation
 			player.setCurrentActivity("Speaking");
 			player.applyStressChange(0.01);
+			Agent dialogueTarget = null;
+			double closestDistance = Double.MAX_VALUE;
+
+			if (request.getTargetAgent() != null && !request.getTargetAgent().isBlank()) {
+				dialogueTarget = world.getAgent(request.getTargetAgent()).orElse(null);
+			}
+
 			for (Agent listener : world.getAgents()) {
 			    if (listener.getFullName().equals(player.getFullName())) {
 				continue;
@@ -513,10 +675,37 @@ public class SimulationService {
 				&& listener.getLocation().getFullPath().equals(player.getLocation().getFullPath())
 				&& listener.distanceTo(player) <= 110.0) {
 				enqueueReactiveEvent(listener.getFullName(), "overheard: " + request.getSpeakText(), 4, true);
+				double distance = listener.distanceTo(player);
+				if (dialogueTarget == null && distance < closestDistance) {
+				    dialogueTarget = listener;
+				    closestDistance = distance;
+				}
 			    }
 			}
+
+			if (dialogueTarget != null && request.getSpeakText() != null && !request.getSpeakText().isBlank()) {
+				dialogueTarget.setCurrentActivity("Talking with " + player.getFullName());
+				recordCommittedAction(dialogueTarget, "TALK", "responding to player dialogue");
+				res.setTargetAgentState(mapper.fromAgent(dialogueTarget));
+				res.setAgentReplySpeaker(dialogueTarget.getFullName());
+				try {
+				    String contextAwarePrompt = composeContextAwareQuestion(dialogueTarget, request.getSpeakText());
+				    String reply = prompts.ask(dialogueTarget, contextAwarePrompt);
+				    if (reply != null && !reply.isBlank()) {
+				        res.setAgentReplyText(reply);
+				    } else {
+				        res.setAgentReplyText("I need a moment to think about that.");
+				    }
+				    res.setResult("Dialogue complete");
+				} catch (Exception e) {
+				    LOG.warn("Dialogue ask failed for {}: {}", dialogueTarget.getFullName(), e.getMessage());
+				    res.setAgentReplyText("I need a moment to think about that.");
+				    res.setResult("Dialogue fallback response");
+				}
+			} else {
+				res.setResult("Spoke: " + (request.getSpeakText() == null ? "" : request.getSpeakText()));
+			}
 			res.setPlayerState(mapper.fromAgent(player));
-			res.setResult("Spoke: " + (request.getSpeakText() == null ? "" : request.getSpeakText()));
 			return res;
 		}
 
@@ -536,6 +725,9 @@ public class SimulationService {
 		switch (type.toLowerCase()) {
 			case "move":
 				base = 0.05;
+				break;
+			case "wait":
+				base = 0.0;
 				break;
 			case "talk":
 			case "speak":
@@ -584,6 +776,8 @@ public class SimulationService {
 		switch (type.toLowerCase()) {
 			case "move":
 				return 5; // default 5s
+			case "wait":
+				return 2;
 			case "talk":
 			case "speak":
 				return 2;
@@ -627,6 +821,8 @@ public class SimulationService {
 			d.setEmoji(a.getEmoji());
 			d.setStressLevel(a.getStressLevel());
 			d.setMentalState(a.getMentalState());
+			d.setX(a.getX());
+			d.setY(a.getY());
 			deltas.add(d);
 		}
 		return deltas;
@@ -798,7 +994,9 @@ public class SimulationService {
 	List<String> deterministicUpdated = new ArrayList<>();
 	List<String> reacted = new ArrayList<>();
 
-	LocalDate nowDate = SimulationTime.now().toLocalDate();
+	LocalDateTime now = SimulationTime.now();
+	LocalDate nowDate = now.toLocalDate();
+	boolean isEndOfDayReflectionMinute = now.getHour() == 23 && now.getMinute() == 59;
 	Location playerLocation = null;
 	if (request.getPlayerX() != null && request.getPlayerY() != null) {
 	    playerLocation = findLocationAt(request.getPlayerX(), request.getPlayerY());
@@ -810,34 +1008,69 @@ public class SimulationService {
 	    }
 	    RuntimeAgentState state = runtimeStateByAgent.computeIfAbsent(agent.getFullName(), k -> new RuntimeAgentState());
 	    boolean isAware = isAgentAware(agent, playerLocation, request.getPlayerX(), request.getPlayerY(), request.getAwarenessRadius());
+	    traceTrackedAgent(agent, state, "start-turn");
+	    LocalDate lastOrchestratedDate = state.lastOrchestratedAt == null ? null : state.lastOrchestratedAt.toLocalDate();
+	    boolean crossedMidnight = lastOrchestratedDate != null && !lastOrchestratedDate.equals(nowDate);
+
+	    // End-of-day reflection: primary trigger at 23:59 simulation time,
+	    // plus fallback when a tick jumps over midnight.
+	    if ((isEndOfDayReflectionMinute || crossedMidnight)
+		&& (state.lastReflectionDate == null || !state.lastReflectionDate.equals(lastOrchestratedDate == null ? nowDate : lastOrchestratedDate))) {
+		try {
+		    prompts.runEndOfDayReflection(agent);
+		    state.lastReflectionDate = (lastOrchestratedDate == null ? nowDate : lastOrchestratedDate);
+		    llmUpdated.add(agent.getFullName());
+		} catch (Exception e) {
+		    LOG.warn("[Runtime] Reflection failed for {}: {}", agent.getFullName(), e.getMessage());
+		}
+	    }
 
 	    boolean dayStart = request.isForceDayStart() || state.lastRoutineDate == null || !state.lastRoutineDate.equals(nowDate);
 	    if (dayStart) {
-		prompts.updateAgent(agent);
-		state.lastRoutineDate = nowDate;
-		state.lastReflectionDate = nowDate;
-		state.lastLlmCallAt = SimulationTime.now();
-		llmUpdated.add(agent.getFullName());
+		try {
+		    prompts.refreshAgentForNewDay(agent);
+		    state.lastRoutineDate = nowDate;
+		    state.lastLlmCallAt = SimulationTime.now();
+		    llmUpdated.add(agent.getFullName());
+		    traceTrackedAgent(agent, state, "after-day-start-refresh");
+		} catch (Exception e) {
+		    LOG.warn("[Runtime] Day-start refresh failed for {}: {}. Falling back to deterministic update.", agent.getFullName(), e.getMessage());
+		    applyDeterministicCatchUp(agent, isAware);
+		    deterministicUpdated.add(agent.getFullName());
+		    traceTrackedAgent(agent, state, "after-day-start-fallback");
+		}
 	    } else {
 		ReactiveEvent event = pollReactiveEvent(agent.getFullName());
 		if (event != null) {
 		    boolean shouldLlmReact = shouldTriggerLlmReaction(event, isAware);
 		    if (shouldLlmReact) {
-			prompts.react(agent, event.description);
-			state.lastLlmCallAt = SimulationTime.now();
-			reacted.add(agent.getFullName());
-			llmUpdated.add(agent.getFullName());
+			try {
+			    prompts.react(agent, event.description);
+			    state.lastLlmCallAt = SimulationTime.now();
+			    reacted.add(agent.getFullName());
+			    llmUpdated.add(agent.getFullName());
+			} catch (Exception e) {
+			    LOG.warn("[Runtime] Reactive LLM update failed for {}: {}. Falling back to deterministic reaction.", agent.getFullName(), e.getMessage());
+			    applyDeterministicReactiveFallback(agent, event);
+			    deterministicUpdated.add(agent.getFullName());
+			    traceTrackedAgent(agent, state, "after-reactive-fallback");
+			}
 		    } else {
 			applyDeterministicReactiveFallback(agent, event);
 			deterministicUpdated.add(agent.getFullName());
+			traceTrackedAgent(agent, state, "after-reactive-fallback");
 		    }
 		} else {
 		    applyDeterministicCatchUp(agent, isAware);
 		    deterministicUpdated.add(agent.getFullName());
+		    traceTrackedAgent(agent, state, "after-deterministic-catchup");
 		}
 	    }
 
-	    advanceAgentMovement(agent);
+	    if (!request.isPinned(agent.getFullName())) {
+		advanceAgentMovement(agent);
+		traceTrackedAgent(agent, state, "after-movement");
+	    }
 
 	    // Mark agent as orchestrated after first movement pass
 	    agent.setHasBeenOrchestrated(true);
@@ -884,9 +1117,101 @@ public class SimulationService {
 	return Math.hypot(dx, dy) <= Math.max(1.0, radius);
     }
 
+	private boolean isTrackedAgent(Agent agent) {
+		return agent != null
+			&& agent.getFullName() != null
+			&& trackedAgentName != null
+			&& agent.getFullName().equalsIgnoreCase(trackedAgentName);
+	}
+
+	private void setTrackedAgentName(String agentName) {
+		if (agentName == null || agentName.isBlank()) {
+			trackedAgentName = DEFAULT_TRACKED_AGENT_NAME;
+			return;
+		}
+		trackedAgentName = agentName;
+	}
+
+	private boolean shouldAutoTrackNewAgent() {
+		if (trackedAgentName == null || trackedAgentName.isBlank()) {
+			return true;
+		}
+		if (DEFAULT_TRACKED_AGENT_NAME.equalsIgnoreCase(trackedAgentName)) {
+			return true;
+		}
+		return world.getAgent(trackedAgentName).isEmpty();
+	}
+
+	private String getTrackedAgentLabel() {
+		return trackedAgentName == null || trackedAgentName.isBlank() ? DEFAULT_TRACKED_AGENT_NAME : trackedAgentName;
+	}
+
+	private String traceAgentSnapshot(Agent agent) {
+		if (agent == null) {
+			return "agent=null";
+		}
+		String location = agent.getLocation() == null ? "null" : agent.getLocation().getFullPath();
+		String activity = agent.getCurrentActivity() == null ? "null" : agent.getCurrentActivity();
+		String target = agent.getTargetLocation() == null ? "null" : agent.getTargetLocation();
+		return "time=" + SimulationTime.now()
+			+ " loc=" + location
+			+ " activity=" + activity
+			+ " target=" + target
+			+ " pos=(" + String.format("%.1f", agent.getX()) + "," + String.format("%.1f", agent.getY()) + ")";
+	}
+
+	private void traceTrackedAgent(Agent agent, RuntimeAgentState state, String phase) {
+		if (!isTrackedAgent(agent)) {
+			return;
+		}
+		String location = agent.getLocation() == null ? "null" : agent.getLocation().getFullPath();
+		String activity = agent.getCurrentActivity() == null ? "null" : agent.getCurrentActivity();
+		String target = agent.getTargetLocation() == null ? "null" : agent.getTargetLocation();
+		boolean changed = state == null
+			|| !java.util.Objects.equals(state.lastTraceActivity, activity)
+			|| !java.util.Objects.equals(state.lastTraceLocation, location)
+			|| !java.util.Objects.equals(state.lastTraceTarget, target)
+			|| state.lastTraceX == null
+			|| state.lastTraceY == null
+			|| Math.abs(state.lastTraceX - agent.getX()) > TRACE_POSITION_EPSILON
+			|| Math.abs(state.lastTraceY - agent.getY()) > TRACE_POSITION_EPSILON;
+		boolean forcePhase = phase.contains("boundary") || phase.contains("blocked") || phase.contains("arrival");
+		boolean heartbeatDue = state == null
+			|| state.lastTraceLoggedAt == null
+			|| Duration.between(state.lastTraceLoggedAt, SimulationTime.now()).toMinutes() >= TRACK_HEARTBEAT_MINUTES;
+		if (changed || forcePhase || heartbeatDue) {
+			LOG.info("[Track:{}] {}", getTrackedAgentLabel(), phase + " | " + traceAgentSnapshot(agent));
+			if (state != null) {
+				state.lastTraceLoggedAt = SimulationTime.now();
+			}
+		}
+		if (state != null) {
+			state.lastTraceActivity = activity;
+			state.lastTraceLocation = location;
+			state.lastTraceTarget = target;
+			state.lastTraceX = agent.getX();
+			state.lastTraceY = agent.getY();
+		}
+	}
+
     private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
+	InstinctDecision decision = evaluateInstinctDecision(agent, event);
+	if (decision != null) {
+	    agent.applyStressChange(decision.stressDelta);
+	    recordStressEventIfSignificant(agent, event.description);
+	    agent.setCurrentActivity(decision.activity);
+	    if (decision.targetLocation != null && !decision.targetLocation.isBlank()) {
+		agent.setTargetLocation(decision.targetLocation);
+	    }
+	    recordCommittedAction(agent, decision.action, decision.reason);
+	    agent.getMemoryStream().add(new Observation("Instinct response: " + decision.action + " because " + decision.reason));
+	    return;
+	}
+
 	agent.applyStressChange(Math.min(0.25, event.severity * 0.02));
+	recordStressEventIfSignificant(agent, event.description);
 	agent.setCurrentActivity("processing event");
+	recordCommittedAction(agent, "PROCESS_EVENT", event.description);
 	agent.getMemoryStream().add(new Observation("Deterministic response: " + event.description));
     }
 
@@ -897,12 +1222,302 @@ public class SimulationService {
 
 	applyScheduledActivity(agent);
 
+	if (shouldRecoverFromTransientReactiveState(agent)) {
+	    LOG.info("[Reactive] Clearing stale reactive state for {}", agent.getFullName());
+	    agent.setCurrentActivity("following routine");
+	}
+
 	if (agent.getCurrentActivity() == null || agent.getCurrentActivity().isBlank() || "idle".equalsIgnoreCase(agent.getCurrentActivity())) {
 	    agent.setCurrentActivity("following routine");
 	}
 	}
 
+	private boolean shouldRecoverFromTransientReactiveState(Agent agent) {
+		if (agent == null || agent.getTargetLocation() != null) {
+			return false;
+		}
+		if (!isTransientReactiveActivity(agent.getCurrentActivity())) {
+			return false;
+		}
+		return !hasPendingReactiveEvent(agent.getFullName());
+	}
+
+	private boolean isTransientReactiveActivity(String activity) {
+		if (activity == null || activity.isBlank()) {
+			return false;
+		}
+		String lowered = activity.toLowerCase();
+		return lowered.contains("hesitating")
+			|| lowered.contains("processing event")
+			|| lowered.contains("standing ground")
+			|| lowered.contains("protecting nearby ally");
+	}
+
+	private boolean hasPendingReactiveEvent(String agentName) {
+		Deque<ReactiveEvent> queue = reactiveEventsByAgent.get(agentName);
+		return queue != null && !queue.isEmpty();
+	}
+
+	private void recordCommittedAction(Agent agent, String action, String reason) {
+		if (agent == null) {
+			return;
+		}
+		CommittedAction committed = new CommittedAction();
+		committed.action = action;
+		committed.reason = reason;
+		committed.location = agent.getLocation() == null ? null : agent.getLocation().getFullPath();
+		committed.x = agent.getX();
+		committed.y = agent.getY();
+		committed.createdAt = SimulationTime.now();
+
+		Deque<CommittedAction> actions = committedActionsByAgent.computeIfAbsent(agent.getFullName(), k -> new ArrayDeque<>());
+		actions.addFirst(committed);
+		while (actions.size() > MAX_COMMITTED_ACTIONS) {
+			actions.removeLast();
+		}
+	}
+
+	private InstinctDecision evaluateInstinctDecision(Agent agent, ReactiveEvent event) {
+		if (agent == null || event == null) {
+			return null;
+		}
+
+		double aggression = agent.getAggression();
+		double fear = agent.getFearfulness();
+		double loyalty = agent.getLoyalty();
+		double impulsivity = agent.getImpulsivity();
+
+		InstinctDecision decision = new InstinctDecision();
+
+		if (event.severity >= 8 && fear > aggression + 0.15) {
+			Location flee = findSaferLocation(agent);
+			decision.action = "FLEE";
+			decision.activity = "fleeing from danger";
+			decision.targetLocation = flee == null ? null : flee.getFullPath();
+			decision.stressDelta = Math.min(0.2, event.severity * 0.015);
+			decision.reason = "high threat and fear-dominant temperament";
+			return decision;
+		}
+
+		if (event.severity >= 7 && (aggression + impulsivity) > fear) {
+			decision.action = "CONFRONT";
+			decision.activity = "standing ground";
+			decision.targetLocation = agent.getLocation() == null ? null : agent.getLocation().getFullPath();
+			decision.stressDelta = Math.min(0.18, event.severity * 0.012);
+			decision.reason = "threat response with aggressive temperament";
+			return decision;
+		}
+
+		if (event.playerInvolved && loyalty > 0.6 && event.severity >= 5) {
+			decision.action = "PROTECT";
+			decision.activity = "protecting nearby ally";
+			decision.targetLocation = agent.getLocation() == null ? null : agent.getLocation().getFullPath();
+			decision.stressDelta = Math.min(0.12, event.severity * 0.01);
+			decision.reason = "player-involved event with loyal temperament";
+			return decision;
+		}
+
+		if (event.severity >= 4) {
+			decision.action = "FREEZE";
+			decision.activity = "hesitating";
+			decision.targetLocation = null;
+			decision.stressDelta = Math.min(0.1, event.severity * 0.008);
+			decision.reason = "uncertain threat with mixed temperament";
+			return decision;
+		}
+
+		return null;
+	}
+
+	private Location findSaferLocation(Agent agent) {
+		if (agent == null || agent.getLocation() == null) {
+			return null;
+		}
+
+		Location current = agent.getLocation();
+		Location best = null;
+		double bestScore = Double.NEGATIVE_INFINITY;
+
+		for (Location location : getLocationsCached()) {
+			if (location.getFullPath().equals(current.getFullPath())) {
+				continue;
+			}
+			double dx = location.getCenterX() - agent.getX();
+			double dy = location.getCenterY() - agent.getY();
+			double distance = Math.hypot(dx, dy);
+			double score = distance - ("public".equalsIgnoreCase(location.getType()) ? 80.0 : 0.0);
+			if (score > bestScore) {
+				bestScore = score;
+				best = location;
+			}
+		}
+
+		return best;
+	}
+
+	private String composeContextAwareQuestion(Agent agent, String playerQuestion) {
+		Map<String, Object> packet = new LinkedHashMap<>();
+
+		Map<String, Object> temperament = new LinkedHashMap<>();
+		temperament.put("aggression", roundTrait(agent.getAggression()));
+		temperament.put("fearfulness", roundTrait(agent.getFearfulness()));
+		temperament.put("loyalty", roundTrait(agent.getLoyalty()));
+		temperament.put("impulsivity", roundTrait(agent.getImpulsivity()));
+		temperament.put("compassion", roundTrait(agent.getCompassion()));
+		temperament.put("riskTolerance", roundTrait(agent.getRiskTolerance()));
+		temperament.put("socialDominance", roundTrait(agent.getSocialDominance()));
+
+		Map<String, Object> self = new LinkedHashMap<>();
+		self.put("name", agent.getFullName());
+		self.put("location", agent.getLocation() == null ? null : agent.getLocation().getFullPath());
+		self.put("x", agent.getX());
+		self.put("y", agent.getY());
+		self.put("currentActivity", agent.getCurrentActivity());
+		self.put("temperament", temperament);
+
+		List<Map<String, Object>> nearbyAgents = new ArrayList<>();
+		for (Agent other : world.getAgents()) {
+			if (other.getFullName().equals(agent.getFullName())) {
+				continue;
+			}
+			double distance = agent.distanceTo(other);
+			if (distance > 180.0) {
+				continue;
+			}
+			Map<String, Object> row = new LinkedHashMap<>();
+			row.put("name", other.getFullName());
+			row.put("location", other.getLocation() == null ? null : other.getLocation().getFullPath());
+			row.put("distance", roundTrait(distance / 180.0) * 180.0);
+			row.put("activity", other.getCurrentActivity());
+			nearbyAgents.add(row);
+		}
+
+		List<Map<String, Object>> commitments = new ArrayList<>();
+		Deque<CommittedAction> committed = committedActionsByAgent.getOrDefault(agent.getFullName(), new ArrayDeque<>());
+		int count = 0;
+		for (CommittedAction c : committed) {
+			if (count++ >= 3) {
+				break;
+			}
+			Map<String, Object> row = new LinkedHashMap<>();
+			row.put("action", c.action);
+			row.put("reason", c.reason);
+			row.put("location", c.location);
+			row.put("time", c.createdAt == null ? null : c.createdAt.toString());
+			commitments.add(row);
+		}
+
+		packet.put("self", self);
+		packet.put("nearbyAgents", nearbyAgents);
+		packet.put("committedActions", commitments);
+
+		return "You must stay consistent with committed actions and current world state. "
+			+ "Here is a compact environment packet: " + packet.toString()
+			+ "\nPlayer says: " + playerQuestion;
+	}
+
+private static final double STRESS_MEMORY_THRESHOLD = 0.5;
+
+	/**
+	 * Records a high-importance observation in the agent's memory when their
+	 * stress level is at or above the significant threshold after an event.
+	 * These memories persist and influence future planning and reactions.
+	 */
+	private void recordStressEventIfSignificant(Agent agent, String eventDescription) {
+		double level = agent.getStressLevel();
+		if (level >= STRESS_MEMORY_THRESHOLD) {
+			String memText = "High-stress event: " + eventDescription
+				+ " (stress " + String.format("%.0f", level * 100) + "%)";
+			Observation stressMemory = new Observation(memText);
+			stressMemory.setImportance(8);
+			stressMemory.setReactable(false);
+			agent.getMemoryStream().add(stressMemory);
+			LOG.info("[Stress] Recorded stress memory for {}: {}", agent.getFullName(), memText);
+		}
+	}
+
+	private double roundTrait(double value) {
+		return Math.round(value * 100.0) / 100.0;
+	}
+
 	private void applyScheduledActivity(Agent agent) {
+		LocalDateTime now = SimulationTime.now();
+		List<io.github.nickm980.smallville.memory.Commitment> commitments = agent.getMemoryStream()
+			.getPlans(io.github.nickm980.smallville.memory.PlanType.COMMITMENT).stream()
+			.filter(p -> p instanceof io.github.nickm980.smallville.memory.Commitment)
+			.map(p -> (io.github.nickm980.smallville.memory.Commitment) p)
+			.collect(Collectors.toList());
+
+		// Expire commitments whose window has passed
+		commitments.stream()
+			.filter(c -> c.isExpired(now)
+				&& c.getStatus() != io.github.nickm980.smallville.memory.CommitmentStatus.COMPLETED)
+			.forEach(c -> {
+				if (c.getStatus() == io.github.nickm980.smallville.memory.CommitmentStatus.PENDING) {
+					c.setStatus(io.github.nickm980.smallville.memory.CommitmentStatus.DEFERRED);
+				} else {
+					c.setStatus(io.github.nickm980.smallville.memory.CommitmentStatus.COMPLETED);
+				}
+				// Clear the target so the agent stops heading there
+				if (agent.getTargetLocation() != null
+					&& agent.getTargetLocation().equalsIgnoreCase(c.getLocation())) {
+					agent.setTargetLocation(null);
+				}
+			});
+
+		// Find the highest-priority active commitment for this sim moment
+		io.github.nickm980.smallville.memory.Commitment active = commitments.stream()
+			.filter(c -> c.getStatus() != io.github.nickm980.smallville.memory.CommitmentStatus.COMPLETED
+				&& c.isActiveAt(now))
+			.max(java.util.Comparator.comparingInt(
+				io.github.nickm980.smallville.memory.Commitment::getPriority))
+			.orElse(null);
+
+		if (active != null) {
+			if (active.getStatus() == io.github.nickm980.smallville.memory.CommitmentStatus.PENDING) {
+				active.setStatus(io.github.nickm980.smallville.memory.CommitmentStatus.ACTIVE);
+			}
+			Location activeLocation = world.getLocation(active.getLocation()).orElse(null);
+			boolean atCommitmentLocation = activeLocation != null
+				? isAgentWithinLocationBounds(agent, activeLocation)
+				: (agent.getLocation() != null
+					&& agent.getLocation().getFullPath().equalsIgnoreCase(active.getLocation()));
+			if (atCommitmentLocation) {
+				if (activeLocation != null) {
+					agent.setLocation(activeLocation);
+				}
+				agent.setTargetLocation(null);
+				agent.setCurrentActivity(active.getGoal());
+			} else {
+				agent.setCurrentActivity("heading to " + active.getLocation() + " for " + active.getGoal());
+				agent.setTargetLocation(active.getLocation());
+			}
+			return;
+		}
+
+		// If the next commitment starts soon, begin traveling toward it so agents don't
+		// appear idle/stuck between windows.
+		io.github.nickm980.smallville.memory.Commitment upcoming = commitments.stream()
+			.filter(c -> c.getStatus() == io.github.nickm980.smallville.memory.CommitmentStatus.PENDING)
+			.filter(c -> !c.getTime().isBefore(now))
+			.min(Comparator.comparing(io.github.nickm980.smallville.memory.Commitment::getTime))
+			.orElse(null);
+
+		if (upcoming != null) {
+			long minutesUntilStart = Duration.between(now, upcoming.getTime()).toMinutes();
+			if (minutesUntilStart <= 30) {
+				agent.setCurrentActivity("getting ready for " + upcoming.getGoal());
+				if (agent.getLocation() == null
+					|| !agent.getLocation().getFullPath().equalsIgnoreCase(upcoming.getLocation())) {
+					agent.setTargetLocation(upcoming.getLocation());
+				} else {
+					agent.setTargetLocation(null);
+				}
+				return;
+			}
+		}
+
+		// No active commitment; fall back to short-term plan selection
 		Plan currentPlan = findCurrentPlan(agent);
 		if (currentPlan == null) {
 			return;
@@ -926,24 +1541,28 @@ public class SimulationService {
 			.filter(plan -> plan.getType() == io.github.nickm980.smallville.memory.PlanType.SHORT_TERM)
 			.collect(Collectors.toList());
 
-		Plan candidate = null;
-		for (Plan plan : shortTermPlans) {
-			if (plan.getTime() == null || plan.getTime().isAfter(now)) {
-				continue;
-			}
-			if (candidate == null || plan.getTime().isAfter(candidate.getTime())) {
-				candidate = plan;
-			}
+		if (shortTermPlans.isEmpty()) {
+			return null;
 		}
 
-		if (candidate != null) {
-			return candidate;
+		// Prefer plans within a fuzzy two-hour window around current simulation time.
+		final long fuzzyWindowMinutes = 120;
+		Plan inWindow = shortTermPlans.stream()
+			.filter(plan -> plan.getTime() != null)
+			.min(Comparator.comparingLong(plan -> {
+				long delta = Math.abs(java.time.Duration.between(now, plan.getTime()).toMinutes());
+				return delta <= fuzzyWindowMinutes ? delta : Long.MAX_VALUE / 2 + delta;
+			}))
+			.orElse(null);
+
+		if (inWindow != null) {
+			return inWindow;
 		}
 
-		return agent.getMemoryStream().getPlans().stream()
+		return shortTermPlans.stream()
 			.filter(plan -> plan.getTime() != null)
 			.min(Comparator.comparing(plan -> java.time.Duration.between(now, plan.getTime()).abs()))
-			.orElse(null);
+			.orElse(shortTermPlans.get(0));
 	}
 
 	private String stripLeadingTime(String description) {
@@ -963,12 +1582,14 @@ public class SimulationService {
 		return match;
 	}
 
-	private void advanceAgentMovement(Agent agent) {
-		// Skip movement on first turn after agent creation
-		if (!agent.hasBeenOrchestrated()) {
-			return;
+	private boolean isAgentWithinLocationBounds(Agent agent, Location location) {
+		if (agent == null || location == null) {
+			return false;
 		}
+		return location.isWithinBounds(agent.getX(), agent.getY());
+	}
 
+	private void advanceAgentMovement(Agent agent) {
 		Location targetLocation = resolveTargetLocation(agent);
 		if (targetLocation == null) {
 			stepAgentRoutine(agent);
@@ -978,12 +1599,12 @@ public class SimulationService {
 		double targetX;
 		double targetY;
 		if (agent.getLocation() != null && targetLocation.getFullPath().equals(agent.getLocation().getFullPath())) {
-			targetX = snapToTile(targetLocation.getCenterX());
-			targetY = snapToTile(targetLocation.getCenterY());
+			targetX = snapToTileWithinBounds(targetLocation.getCenterX(), targetLocation.getMinX(), targetLocation.getMaxX());
+			targetY = snapToTileWithinBounds(targetLocation.getCenterY(), targetLocation.getMinY(), targetLocation.getMaxY());
 		} else {
 			// Choose the nearest in-bounds tile as an "entrance" point into the destination location.
-			targetX = snapToTile(clamp(agent.getX(), targetLocation.getMinX(), targetLocation.getMaxX()));
-			targetY = snapToTile(clamp(agent.getY(), targetLocation.getMinY(), targetLocation.getMaxY()));
+			targetX = snapToTileWithinBounds(agent.getX(), targetLocation.getMinX(), targetLocation.getMaxX());
+			targetY = snapToTileWithinBounds(agent.getY(), targetLocation.getMinY(), targetLocation.getMaxY());
 		}
 
 		stepAgentToward(agent, targetX, targetY, targetLocation);
@@ -1001,9 +1622,10 @@ public class SimulationService {
 			return null;
 		}
 
-		if (agent.getLocation() != null && agent.getLocation().getFullPath().equals(target.getFullPath())
-				&& toTile(agent.getX()) == toTile(target.getCenterX())
-				&& toTile(agent.getY()) == toTile(target.getCenterY())) {
+		// Boundary-entry semantics: as soon as the agent crosses into destination bounds,
+		// they have arrived and should transition into the activity there.
+		if (isAgentWithinLocationBounds(agent, target)) {
+			agent.setLocation(target);
 			agent.setTargetLocation(null);
 			return null;
 		}
@@ -1014,35 +1636,98 @@ public class SimulationService {
 	private void stepAgentRoutine(Agent agent) {
 		Location current = agent.getLocation();
 		if (current == null) {
-			return;
+			current = findLocationAt(agent.getX(), agent.getY());
+			if (current != null) {
+				agent.setLocation(current);
+			} else {
+				current = findNearestLocation(agent.getX(), agent.getY());
+				if (current == null) {
+					return;
+				}
+				agent.setLocation(current);
+			}
 		}
+
+		boolean constrainToCurrentLocation = agent.getTargetLocation() == null && current != null && !isTransitLocation(current);
 
 		int directionSeed = Math.floorMod((agent.getFullName() + SimulationTime.now().toString()).hashCode(), 4);
-		double nextX = agent.getX();
-		double nextY = agent.getY();
-		switch (directionSeed) {
-			case 0:
-				nextX += TILE_SIZE;
-				break;
-			case 1:
-				nextX -= TILE_SIZE;
-				break;
-			case 2:
-				nextY += TILE_SIZE;
-				break;
-			default:
-				nextY -= TILE_SIZE;
-				break;
-		}
+		int[] directionOrder = new int[] {
+			directionSeed,
+			(directionSeed + 1) % 4,
+			(directionSeed + 2) % 4,
+			(directionSeed + 3) % 4
+		};
 
-		nextX = snapToTile(clamp(nextX, current.getMinX(), current.getMaxX()));
-		nextY = snapToTile(clamp(nextY, current.getMinY(), current.getMaxY()));
-		if (toTile(nextX) == toTile(agent.getX()) && toTile(nextY) == toTile(agent.getY())) {
+		for (int direction : directionOrder) {
+			double nextX = agent.getX();
+			double nextY = agent.getY();
+			switch (direction) {
+				case 0:
+					nextX += TILE_SIZE;
+					break;
+				case 1:
+					nextX -= TILE_SIZE;
+					break;
+				case 2:
+					nextY += TILE_SIZE;
+					break;
+				default:
+					nextY -= TILE_SIZE;
+					break;
+			}
+
+			nextX = snapToTile(clamp(nextX, 0.0, 1800.0));
+			nextY = snapToTile(clamp(nextY, 0.0, 1200.0));
+			if (toTile(nextX) == toTile(agent.getX()) && toTile(nextY) == toTile(agent.getY())) {
+				continue;
+			}
+			if (isTileOccupiedByOtherAgent(nextX, nextY, agent)) {
+				continue;
+			}
+			if (constrainToCurrentLocation && !current.isWithinBounds(nextX, nextY)) {
+				continue;
+			}
+			agent.setPosition(nextX, nextY);
+			Location atNewPosition = findLocationAt(nextX, nextY);
+			if (atNewPosition != null) {
+				agent.setLocation(atNewPosition);
+			}
 			return;
 		}
-		if (!isTileOccupiedByOtherAgent(nextX, nextY, agent)) {
-			agent.setPosition(nextX, nextY);
+
+		if (constrainToCurrentLocation) {
+			return;
 		}
+
+		// Anti-stall fallback: if all four adjacent routine tiles are blocked,
+		// try to relocate to the nearest free tile in a small radius.
+		tryNudgeAgentToNearbyFreeTile(agent, 3);
+	}
+
+	private boolean isTransitLocation(Location location) {
+		if (location == null || location.getFullPath() == null) {
+			return false;
+		}
+		String lowered = location.getFullPath().toLowerCase();
+		return lowered.contains("street")
+			|| lowered.contains("road")
+			|| lowered.contains("path")
+			|| lowered.contains("sidewalk");
+	}
+
+	private Location findNearestLocation(double x, double y) {
+		Location best = null;
+		double bestDistance = Double.MAX_VALUE;
+		for (Location location : getLocationsCached()) {
+			double centerX = location.getCenterX();
+			double centerY = location.getCenterY();
+			double distance = Math.hypot(centerX - x, centerY - y);
+			if (best == null || distance < bestDistance) {
+				best = location;
+				bestDistance = distance;
+			}
+		}
+		return best;
 	}
 
 	private void stepAgentToward(Agent agent, double targetX, double targetY, Location targetLocation) {
@@ -1054,8 +1739,12 @@ public class SimulationService {
 			Location locationAtCurrent = findLocationAt(agent.getX(), agent.getY());
 			if (locationAtCurrent != null) {
 				agent.setLocation(locationAtCurrent);
-				if (locationAtCurrent.getFullPath().equals(targetLocation.getFullPath())) {
+				if (isAgentWithinLocationBounds(agent, targetLocation)) {
+					agent.setLocation(targetLocation);
 					agent.setTargetLocation(null);
+					if (isTrackedAgent(agent)) {
+						LOG.info("[Track:{}] arrival-at-boundary | {}", getTrackedAgentLabel(), traceAgentSnapshot(agent));
+					}
 				}
 			}
 			return;
@@ -1080,19 +1769,303 @@ public class SimulationService {
 			double nextX = candidate[0];
 			double nextY = candidate[1];
 			if (isTileOccupiedByOtherAgent(nextX, nextY, agent)) {
+				if (isTrackedAgent(agent)) {
+					LOG.info("[Track:{}] blocked-candidate ({}, {})", getTrackedAgentLabel(),
+						String.format("%.1f", nextX), String.format("%.1f", nextY));
+				}
 				continue;
 			}
 			agent.setPosition(nextX, nextY);
 			Location locationAtNewPosition = findLocationAt(nextX, nextY);
 			if (locationAtNewPosition != null) {
 				agent.setLocation(locationAtNewPosition);
-				if (locationAtNewPosition.getFullPath().equals(targetLocation.getFullPath())
-						&& toTile(nextX) == targetTileX && toTile(nextY) == targetTileY) {
+				if (isAgentWithinLocationBounds(agent, targetLocation)) {
+					agent.setLocation(targetLocation);
 					agent.setTargetLocation(null);
+					if (isTrackedAgent(agent)) {
+							LOG.info("[Track:{}] entered-target-bounds | {}", getTrackedAgentLabel(), traceAgentSnapshot(agent));
+					}
 				}
 			}
 			return;
 		}
+
+		// If direct path tiles are blocked, fall back to a routine step to unjam.
+		if (isTrackedAgent(agent)) {
+			LOG.info("[Track:{}] all-direct-candidates-blocked, routine-fallback | {}", getTrackedAgentLabel(), traceAgentSnapshot(agent));
+		}
+		stepAgentRoutine(agent);
+	}
+
+	private int clearNonPlayerAgents() {
+		List<String> removedNames = world.getAgents().stream()
+			.filter(agent -> !(agent instanceof Player))
+			.map(Agent::getFullName)
+			.collect(Collectors.toList());
+		int removedAgents = world.removeNonPlayerAgents();
+		for (String name : removedNames) {
+			runtimeStateByAgent.remove(name);
+			reactiveEventsByAgent.remove(name);
+			committedActionsByAgent.remove(name);
+		}
+		if (removedNames.stream().anyMatch(name -> name.equalsIgnoreCase(getTrackedAgentLabel()))) {
+			setTrackedAgentName(null);
+		}
+		return removedAgents;
+	}
+
+	private CreateAgentRequest toCreateAgentRequest(GeneratedAgentBlueprint blueprint) {
+		CreateAgentRequest request = new CreateAgentRequest();
+		request.setName(blueprint.getName());
+		request.setActivity(blueprint.getCurrentActivity());
+		request.setLocation(blueprint.getHomeLocation());
+		request.setMemories(blueprint.getMemories());
+		return request;
+	}
+
+	private GeneratedAgentBlueprint parseGeneratedAgentBlueprint(String rawResponse) {
+		if (rawResponse == null || rawResponse.isBlank()) {
+			return null;
+		}
+		String json = extractJsonObject(rawResponse);
+		if (json == null) {
+			return null;
+		}
+		try {
+			return objectMapper.readValue(json, GeneratedAgentBlueprint.class);
+		} catch (Exception e) {
+			LOG.warn("Failed to parse generated agent blueprint: {}", e.getMessage());
+			return null;
+		}
+	}
+
+	private String extractJsonObject(String text) {
+		if (text == null) {
+			return null;
+		}
+		int start = text.indexOf('{');
+		int end = text.lastIndexOf('}');
+		if (start < 0 || end <= start) {
+			return null;
+		}
+		return text.substring(start, end + 1);
+	}
+
+	private GeneratedAgentBlueprint validateAndNormalizeGeneratedAgent(GeneratedAgentBlueprint candidate,
+		GenerateAgentRequest request,
+		Set<String> existingNames,
+		List<Location> locations,
+		List<String> warnings,
+		int index) {
+		GeneratedAgentBlueprint blueprint = candidate == null ? new GeneratedAgentBlueprint() : candidate;
+		if (blueprint.getName() == null || blueprint.getName().isBlank()) {
+			warnings.add("Missing name; applied fallback name");
+			blueprint.setName("Generated Agent " + (index + 1));
+		}
+		blueprint.setName(makeUniqueAgentName(blueprint.getName(), existingNames));
+
+		Location location = resolveGeneratedAgentLocation(blueprint.getHomeLocation(), request, locations);
+		if (blueprint.getHomeLocation() == null || !location.getFullPath().equalsIgnoreCase(blueprint.getHomeLocation())) {
+			warnings.add("Adjusted homeLocation to an existing location");
+		}
+		blueprint.setHomeLocation(location.getFullPath());
+
+		if (blueprint.getCurrentActivity() == null || blueprint.getCurrentActivity().isBlank()) {
+			warnings.add("Missing currentActivity; applied fallback activity");
+			blueprint.setCurrentActivity("settling into the day at " + location.getFullPath());
+		}
+
+		blueprint.setCoreTraits(sanitizeTextList(blueprint.getCoreTraits(), 0, 6));
+		blueprint.setFlaws(sanitizeTextList(blueprint.getFlaws(), 0, 4));
+		blueprint.setMemories(normalizeGeneratedMemories(blueprint, location, warnings));
+		if (blueprint.getSocialStyle() == null || blueprint.getSocialStyle().isBlank()) {
+			blueprint.setSocialStyle("guarded but curious");
+		}
+		if (blueprint.getDailyAnchors() == null) {
+			Map<String, String> anchors = new LinkedHashMap<>();
+			anchors.put("morning", "ease into the day near " + location.getFullPath());
+			anchors.put("noon", "watch people passing through " + location.getFullPath());
+			anchors.put("evening", "reflect quietly before heading home");
+			blueprint.setDailyAnchors(anchors);
+		}
+		return blueprint;
+	}
+
+	private List<String> normalizeGeneratedMemories(GeneratedAgentBlueprint blueprint, Location location, List<String> warnings) {
+		LinkedHashSet<String> memories = new LinkedHashSet<>(sanitizeTextList(blueprint.getMemories(), 0, 12));
+		if (memories.size() < 6) {
+			warnings.add("Expanded memory list to minimum viable seed set");
+		}
+		for (String trait : sanitizeTextList(blueprint.getCoreTraits(), 0, 6)) {
+			if (memories.size() >= 12) {
+				break;
+			}
+			memories.add("People often read me as " + trait + ", even when they miss the full story.");
+		}
+		for (String flaw : sanitizeTextList(blueprint.getFlaws(), 0, 4)) {
+			if (memories.size() >= 12) {
+				break;
+			}
+			memories.add("I know my habit of being " + flaw + " gets me into trouble sometimes.");
+		}
+		if (memories.size() < 12) {
+			memories.add("I spend a lot of time around " + location.getFullPath() + ".");
+		}
+		if (memories.size() < 12) {
+			memories.add("I have reasons for keeping some parts of myself hidden from strangers.");
+		}
+		if (memories.size() < 12) {
+			memories.add("I want my day to look ordinary even when my thoughts are not.");
+		}
+		return memories.stream().limit(12).collect(Collectors.toList());
+	}
+
+	private List<String> sanitizeTextList(List<String> values, int min, int max) {
+		LinkedHashSet<String> sanitized = new LinkedHashSet<>();
+		if (values != null) {
+			for (String value : values) {
+				if (value == null) {
+					continue;
+				}
+				String cleaned = value.trim();
+				if (!cleaned.isBlank()) {
+					sanitized.add(cleaned);
+				}
+				if (sanitized.size() == max) {
+					break;
+				}
+			}
+		}
+		return new ArrayList<>(sanitized.stream().limit(Math.max(min, max)).collect(Collectors.toList()));
+	}
+
+	private String makeUniqueAgentName(String baseName, Set<String> existingNames) {
+		String cleaned = baseName == null ? "Generated Agent" : baseName.trim();
+		if (cleaned.isBlank()) {
+			cleaned = "Generated Agent";
+		}
+		String candidate = cleaned;
+		int suffix = 2;
+		while (containsNameIgnoreCase(existingNames, candidate)) {
+			candidate = cleaned + " " + suffix;
+			suffix++;
+		}
+		return candidate;
+	}
+
+	private boolean containsNameIgnoreCase(Set<String> existingNames, String candidate) {
+		for (String name : existingNames) {
+			if (name != null && name.equalsIgnoreCase(candidate)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private Location resolveGeneratedAgentLocation(String proposedLocation, GenerateAgentRequest request, List<Location> locations) {
+		Location exact = findLocationByName(proposedLocation, locations);
+		if (exact != null) {
+			return exact;
+		}
+		Location preferred = findLocationByName(request == null ? null : request.getPreferredLocation(), locations);
+		if (preferred != null) {
+			return preferred;
+		}
+		return locations.get(0);
+	}
+
+	private Location findLocationByName(String locationName, List<Location> locations) {
+		if (locationName == null || locationName.isBlank()) {
+			return null;
+		}
+		for (Location location : locations) {
+			if (location.getFullPath().equalsIgnoreCase(locationName.trim())) {
+				return location;
+			}
+		}
+		return null;
+	}
+
+	private String buildAgentGenerationPrompt(GenerateAgentRequest request, int index, List<Location> locations, Set<String> existingNames) {
+		String locationList = locations.stream().map(Location::getFullPath).collect(Collectors.joining(", "));
+		String usedNames = existingNames.isEmpty() ? "none" : String.join(", ", existingNames);
+		String extraPrompt = request.getPrompt() == null || request.getPrompt().isBlank()
+			? ""
+			: "Additional theme request: " + request.getPrompt().trim() + "\n";
+		return "Generate exactly one Smallville NPC as strict JSON with no markdown or commentary.\n"
+			+ "The NPC must be internally consistent, have believable flaws, and may appear contradictory from the outside.\n"
+			+ extraPrompt
+			+ "Use one homeLocation from this exact list: [" + locationList + "]\n"
+			+ "Do not reuse these names: [" + usedNames + "]\n"
+			+ "Return a JSON object with these keys only: name, homeLocation, currentActivity, coreTraits, flaws, memories, socialStyle, dailyAnchors.\n"
+			+ "Constraints:\n"
+			+ "- currentActivity: short present-tense phrase\n"
+			+ "- coreTraits: array of 3 to 5 strings\n"
+			+ "- flaws: array of 2 to 4 strings\n"
+			+ "- memories: array of 6 to 10 short first-person factual memories\n"
+			+ "- dailyAnchors: object with morning, noon, evening strings\n"
+			+ "- keep the NPC grounded in the chosen location and suitable for a town simulation\n"
+			+ "- this is NPC number " + (index + 1) + " in the batch\n"
+			+ "JSON only.";
+	}
+
+	private String buildAgentRepairPrompt(String rawGeneration,
+		List<String> validationIssues,
+		GenerateAgentRequest request,
+		List<Location> locations,
+		Set<String> existingNames) {
+		String locationList = locations.stream().map(Location::getFullPath).collect(Collectors.joining(", "));
+		String usedNames = existingNames.isEmpty() ? "none" : String.join(", ", existingNames);
+		return "Repair the following NPC JSON so it satisfies the schema and constraints. Keep the spirit of the character. Return strict JSON only.\n"
+			+ "Allowed locations: [" + locationList + "]\n"
+			+ "Disallowed duplicate names: [" + usedNames + "]\n"
+			+ "Validation issues: " + String.join("; ", validationIssues) + "\n"
+			+ "Required keys only: name, homeLocation, currentActivity, coreTraits, flaws, memories, socialStyle, dailyAnchors\n"
+			+ "Additional theme request: " + (request.getPrompt() == null ? "none" : request.getPrompt()) + "\n"
+			+ "Original JSON candidate:\n"
+			+ rawGeneration;
+	}
+
+	private boolean tryNudgeAgentToNearbyFreeTile(Agent agent, int radiusTiles) {
+		if (agent == null) {
+			return false;
+		}
+		int baseTileX = toTile(agent.getX());
+		int baseTileY = toTile(agent.getY());
+
+		for (int radius = 1; radius <= Math.max(1, radiusTiles); radius++) {
+			for (int dx = -radius; dx <= radius; dx++) {
+				for (int dy = -radius; dy <= radius; dy++) {
+					if (Math.abs(dx) != radius && Math.abs(dy) != radius) {
+						continue;
+					}
+
+					double candidateX = snapToTile((baseTileX + dx) * TILE_SIZE);
+					double candidateY = snapToTile((baseTileY + dy) * TILE_SIZE);
+
+					candidateX = snapToTile(clamp(candidateX, 0.0, 1800.0));
+					candidateY = snapToTile(clamp(candidateY, 0.0, 1200.0));
+
+					if (toTile(candidateX) == baseTileX && toTile(candidateY) == baseTileY) {
+						continue;
+					}
+					if (isTileOccupiedByOtherAgent(candidateX, candidateY, agent)) {
+						continue;
+					}
+
+					Location location = findLocationAt(candidateX, candidateY);
+					if (location == null) {
+						continue;
+					}
+
+					agent.setPosition(candidateX, candidateY);
+					agent.setLocation(location);
+					return true;
+				}
+			}
+		}
+
+		return false;
 	}
 
 	private boolean isTileOccupiedByOtherAgent(double x, double y, Agent ignoreAgent) {
@@ -1140,6 +2113,16 @@ public class SimulationService {
 		return Math.round(coordinate / TILE_SIZE) * TILE_SIZE;
 	}
 
+	private double snapToTileWithinBounds(double coordinate, double min, double max) {
+		double minTile = Math.ceil(min / TILE_SIZE) * TILE_SIZE;
+		double maxTile = Math.floor(max / TILE_SIZE) * TILE_SIZE;
+		if (minTile <= maxTile) {
+			double snapped = snapToTile(coordinate);
+			return clamp(snapped, minTile, maxTile);
+		}
+		return clamp(coordinate, min, max);
+	}
+
     private double clamp(double value, double min, double max) {
 	return Math.max(min, Math.min(max, value));
     }
@@ -1153,13 +2136,58 @@ public class SimulationService {
     }
 
     private Location findLocationAt(double x, double y) {
+	Location specificMatch = null;
+	double smallestArea = Double.MAX_VALUE;
+	Location outsideMatch = null;
+
 	for (Location location : getLocationsCached()) {
-	    if (location.isWithinBounds(x, y)) {
+	    if (!location.isWithinBounds(x, y)) {
+		continue;
+	    }
+
+	    if (isOutsideLocation(location)) {
+		outsideMatch = location;
+		continue;
+	    }
+
+	    double area = locationArea(location);
+	    if (specificMatch == null || area < smallestArea) {
+		specificMatch = location;
+		smallestArea = area;
+	    }
+	}
+
+	if (specificMatch != null) {
+	    return specificMatch;
+	}
+	if (outsideMatch != null) {
+	    return outsideMatch;
+	}
+
+	for (Location location : getLocationsCached()) {
+	    if (isOutsideLocation(location)) {
 		return location;
 	    }
 	}
+
 	return null;
     }
+
+	private boolean isOutsideLocation(Location location) {
+		if (location == null || location.getFullPath() == null) {
+			return false;
+		}
+		String name = location.getFullPath().toLowerCase();
+		String type = location.getType() == null ? "" : location.getType().toLowerCase();
+		return "outside".equals(name) || "street".equals(name) || "road".equals(name)
+			|| "outside".equals(type) || "street".equals(type) || "road".equals(type);
+	}
+
+	private double locationArea(Location location) {
+		double width = Math.max(0.0, location.getMaxX() - location.getMinX());
+		double height = Math.max(0.0, location.getMaxY() - location.getMinY());
+		return width * height;
+	}
 
     public Map<String, Object> getAgentMemorySummary(String agentName) {
 	Agent agent = world.getAgent(agentName).orElseThrow(() -> new AgentNotFoundException(agentName));
@@ -1194,6 +2222,29 @@ public class SimulationService {
 	return all.get(index);
     }
 
+    public Map<String, Object> bootstrapSchedules() {
+	List<String> bootstrapped = new ArrayList<>();
+	List<String> skipped = new ArrayList<>();
+	for (Agent agent : world.getAgents()) {
+	    if (agent instanceof Player) {
+		skipped.add(agent.getFullName() + " (player)");
+		continue;
+	    }
+	    if (agent.getMemoryStream().getPlans().isEmpty()) {
+		try {
+		    prompts.updateAgent(agent);
+		    bootstrapped.add(agent.getFullName());
+		} catch (Exception e) {
+		    LOG.warn("Bootstrap schedule failed for {}: {}", agent.getFullName(), e.getMessage());
+		    skipped.add(agent.getFullName() + " (error: " + e.getMessage() + ")");
+		}
+	    } else {
+		skipped.add(agent.getFullName() + " (already has schedule)");
+	    }
+	}
+	return Map.of("bootstrapped", bootstrapped, "skipped", skipped);
+    }
+
     public List<ScheduleResponse> getAgentSchedule(String agentName) {
 	Agent agent = world.getAgent(agentName).orElseThrow(() -> new AgentNotFoundException(agentName));
 	List<ScheduleResponse> schedule = new ArrayList<>();
@@ -1209,6 +2260,7 @@ public class SimulationService {
 	
 	// Sort by time ascending
 	schedule.sort((a, b) -> a.getTime().compareTo(b.getTime()));
+	LOG.info("[Schedules] Returning {} schedule items for {}", schedule.size(), agentName);
 	
 	return schedule;
     }
