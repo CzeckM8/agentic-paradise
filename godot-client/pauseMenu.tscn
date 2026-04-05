@@ -1,6 +1,4 @@
-[gd_scene format=3 uid="uid://dnqb5kxjgjbl3"]
-
-[ext_resource type="Texture2D" uid="uid://bt1s5egs3v3er" path="res://paradise-background.jpg" id="1_hfklj"]
+[gd_scene format=3 uid="uid://b637x3nhm2igi"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_45vjg"]
 content_margin_left = 26.0
@@ -105,7 +103,6 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-texture = ExtResource("1_hfklj")
 expand_mode = 1
 stretch_mode = 6
 
