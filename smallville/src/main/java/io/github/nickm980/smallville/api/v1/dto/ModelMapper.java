@@ -29,22 +29,9 @@ public class ModelMapper {
 	result.setName(agent.getFullName());
 	result.setX(agent.getX());
 	result.setY(agent.getY());
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
 	result.setTargetLocation(agent.getTargetLocation());
-=======
 	result.setActiveAction(fromAgentAction(agent.getActiveAction()));
 	result.setQueuedActions(agent.getQueuedActions().stream().map(this::fromAgentAction).toList());
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
-	result.setActiveAction(fromAgentAction(agent.getActiveAction()));
-	result.setQueuedActions(agent.getQueuedActions().stream().map(this::fromAgentAction).toList());
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
-	result.setActiveAction(fromAgentAction(agent.getActiveAction()));
-	result.setQueuedActions(agent.getQueuedActions().stream().map(this::fromAgentAction).toList());
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
 	return result;
     }
 

@@ -183,6 +183,7 @@ public class SimulationService {
 		double snapshotY;
 		String snapshotLocation; // cached target location path
 		String topic;            // conversation topic / interaction payload
+		String opener;           // pre-generated opening line (set at goal-commit time, before approach)
 		String description;      // human-readable goal summary
 		double priority;         // 0-1 salience score used to pick the best goal
 		String actionType;       // e.g. speak/interact/attack
@@ -603,6 +604,13 @@ public class SimulationService {
 	    player.getStress()
 	);
 	response.setInventory(getInventoryArray(player));
+	response.setInventoryObjects(
+	    getInventorySet(player).stream()
+		.map(id -> objectInstances.get(id))
+		.filter(obj -> obj != null)
+		.map(WorldObjectInstance::toMap)
+		.collect(Collectors.toList())
+	);
 	response.setX(player.getX());
 	response.setY(player.getY());
 	return response;
@@ -809,7 +817,7 @@ public class SimulationService {
 				res.setTargetAgentState(mapper.fromAgent(targetAgent));
 			}
 
-			res.setPlayerState(mapper.fromAgent(player));
+			res.setPlayerState(fromAgentWithInventory(player));
 			res.setStressChange(-0.02);
 			res.setResult("Wait action processed");
 			return res;
@@ -851,16 +859,44 @@ public class SimulationService {
 				throw new SmallvilleException("Target tile is occupied by " + occupant.getFullName());
 			}
 			WorldObjectInstance blockingObject = findBlockingObjectAtTile(destination, stepX, stepY);
+			boolean isClimbMove = request.getFlair() != null
+				&& request.getFlair().toLowerCase().contains("action:climb");
 			if (blockingObject != null) {
-				throw new SmallvilleException("Target tile is blocked by " + blockingObject.name);
+				if (isClimbMove && isObjectClimbable(blockingObject)) {
+					player.setCurrentActivity("Climbing onto " + blockingObject.name);
+				} else {
+					throw new SmallvilleException("Target tile is blocked by " + blockingObject.name);
+				}
 			}
 
 			player.setLocation(destination);
 			player.setPosition(stepX, stepY);
 			player.setCurrentActivity("Moving toward " + destination.getFullPath());
 
-			res.setPlayerState(mapper.fromAgent(player));
+			res.setPlayerState(fromAgentWithInventory(player));
 			res.setStressChange(0);
+			return res;
+		}
+
+		if ("drop".equalsIgnoreCase(request.getActionType())) {
+			String dropToken = request.getTargetAgent();
+			String objId = dropToken != null && dropToken.startsWith("object:") ? dropToken.substring(7) : dropToken;
+			WorldObjectInstance toDrop = objId != null ? objectInstances.get(objId) : null;
+			if (toDrop != null && isObjectInInventory(player, objId)) {
+				LinkedHashSet<String> inv = getInventorySet(player);
+				inv.remove(objId);
+				if (toDrop.properties == null) toDrop.properties = new HashMap<>();
+				toDrop.properties.remove("heldBy");
+				toDrop.x = snapToTile(player.getX());
+				toDrop.y = snapToTile(player.getY());
+				toDrop.location = player.getLocation() != null ? player.getLocation().getFullPath() : null;
+				refreshAgentCarriedItems(player);
+				recordCommittedAction(player, "DROP", toDrop.id + " at (" + toDrop.x + "," + toDrop.y + ")");
+				res.setResult("Dropped " + toDrop.name);
+			} else {
+				res.setResult("Nothing to drop");
+			}
+			res.setPlayerState(fromAgentWithInventory(player));
 			return res;
 		}
 
@@ -889,16 +925,64 @@ public class SimulationService {
 					: request.getActionDescription();
 				String normalizedVerb = verbDescription.toLowerCase();
 				String normalizedFlair = request.getFlair() == null ? "" : request.getFlair().toLowerCase();
-				if ("entrance_anchor".equalsIgnoreCase(objectTarget.type)
+				// Gate lock and unlock on the actor holding a tagged key or lockpick
+				boolean isLockUnlockVerb = normalizedFlair.contains("action:lock") || normalizedFlair.contains("action:unlock")
+					|| normalizedVerb.contains("unlock") || normalizedVerb.startsWith("lock") || normalizedVerb.contains(" lock");
+				if (isLockUnlockVerb) {
+					if (!actorHasGrant(player, "key")) {
+						throw new SmallvilleException("You need a key to lock or unlock this.");
+					}
+				}
+
+				// Lock / unlock (new vocabulary)
+				if (normalizedFlair.contains("action:unlock") || (normalizedVerb.contains("unlock") && !normalizedVerb.contains("lock"))) {
+					objectTarget.properties.put("locked", false);
+					objectTarget.properties.put("passable", true);
+					verbDescription = "Unlocked " + objectTarget.name;
+				} else if (normalizedFlair.contains("action:lock") || (normalizedVerb.startsWith("lock") || normalizedVerb.contains(" lock"))) {
+					objectTarget.properties.put("locked", true);
+					objectTarget.properties.put("passable", false);
+					verbDescription = "Locked " + objectTarget.name;
+				} else if ("entrance_anchor".equalsIgnoreCase(objectTarget.type)
+					|| asBoolean(objectTarget.properties.get("transition_point"), false)
 					|| containsTag(objectTarget.properties, "entrance")
 					|| containsTag(objectTarget.properties, "door")) {
+					// Legacy open/close — kept for backward compat, writes both old and new props
 					if (normalizedVerb.contains("close")) {
+						objectTarget.properties.put("locked", true);
+						objectTarget.properties.put("passable", false);
 						objectTarget.properties.put("doorOpen", false);
-						verbDescription = "Closed door at " + objectTarget.name;
+						verbDescription = "Closed " + objectTarget.name;
 					} else if (normalizedVerb.contains("open")) {
+						objectTarget.properties.put("locked", false);
+						objectTarget.properties.put("passable", true);
 						objectTarget.properties.put("doorOpen", true);
-						verbDescription = "Opened door at " + objectTarget.name;
+						verbDescription = "Opened " + objectTarget.name;
 					}
+				}
+				// Write — store player-supplied text in the object's has_writing property
+				if (normalizedFlair.contains("action:write") || normalizedVerb.startsWith("write on") || normalizedVerb.contains("writing on")) {
+					String textToWrite = request.getSpeakText();
+					if (textToWrite != null && !textToWrite.isBlank()) {
+						String sanitized = textToWrite.trim();
+						if (sanitized.length() > 280) sanitized = sanitized.substring(0, 280);
+						if (objectTarget.properties == null) objectTarget.properties = new HashMap<>();
+						objectTarget.properties.put("has_writing", sanitized);
+						verbDescription = "Wrote on " + objectTarget.name + ": \"" + sanitized + "\"";
+					} else {
+						verbDescription = "Writing on " + objectTarget.name + " (no text supplied)";
+					}
+				}
+
+				// Read — surface stored writing, no further processing needed
+				if (normalizedFlair.contains("action:read") || normalizedVerb.startsWith("read")) {
+					Object writingObj = objectTarget.properties.get("has_writing");
+					String writing = writingObj != null ? writingObj.toString() : null;
+					res.setResult(writing != null && !writing.isBlank()
+						? "Read: " + writing
+						: objectTarget.name + " has nothing written on it.");
+					res.setPlayerState(fromAgentWithInventory(player));
+					return res;
 				}
 
 				if (normalizedVerb.contains("carry") || normalizedVerb.contains("steal") || normalizedFlair.contains("action:carry")) {
@@ -915,10 +999,15 @@ public class SimulationService {
 				player.setCurrentActivity(verbDescription);
 				double stressDelta = 0.01;
 				String verbLower = verbDescription.toLowerCase();
-				if (verbLower.contains("steal") || verbLower.contains("attack")) {
+				String flairLower = normalizedFlair;
+				if (verbLower.contains("steal") || verbLower.contains("attack") || flairLower.contains("action:bind")) {
 					stressDelta = 0.08;
 				} else if (verbLower.contains("sit") || verbLower.contains("rest") || verbLower.contains("sleep")) {
 					stressDelta = -0.05;
+				} else if (flairLower.contains("action:heal") || flairLower.contains("action:apply_herbs")) {
+					stressDelta = -0.10;  // healing reduces stress
+				} else if (flairLower.contains("action:study") || flairLower.contains("action:light")) {
+					stressDelta = -0.02;  // calm activities
 				}
 				player.applyStressChange(stressDelta);
 				recordCommittedAction(player, "INTERACT_OBJECT", objectTarget.id + " | " + verbDescription);
@@ -934,7 +1023,7 @@ public class SimulationService {
 					}
 				}
 
-				res.setPlayerState(mapper.fromAgent(player));
+				res.setPlayerState(fromAgentWithInventory(player));
 				res.setStressChange(stressDelta);
 				res.setResult("Interacted with " + objectTarget.name);
 				return res;
@@ -988,7 +1077,7 @@ public class SimulationService {
 			    }
 			}
 
-			res.setPlayerState(mapper.fromAgent(player));
+			res.setPlayerState(fromAgentWithInventory(player));
 			res.setTargetAgentState(mapper.fromAgent(targetAgent));
 			res.setStressChange(stressDelta);
 			res.setResult("Distance: " + String.format("%.1f", distance) + " units, Action time: " + adjustedDuration + "s");
@@ -1061,13 +1150,13 @@ public class SimulationService {
 			} else {
 				res.setResult("Spoke: " + (cleanedSpeak == null ? "" : cleanedSpeak));
 			}
-			res.setPlayerState(mapper.fromAgent(player));
+			res.setPlayerState(fromAgentWithInventory(player));
 			return res;
 		}
 
 		// default fallback
 		player.setCurrentActivity(request.getActionDescription() != null ? request.getActionDescription() : "Acting");
-		res.setPlayerState(mapper.fromAgent(player));
+		res.setPlayerState(fromAgentWithInventory(player));
 		return res;
 	}
 
@@ -1258,6 +1347,28 @@ public class SimulationService {
 
 	objectInstances.put(objectId, instance);
 
+	// Auto-add to holder's inventory when heldBy is set (used for seeding starting items)
+	Object heldBy = merged.get("heldBy");
+	if (heldBy != null && !String.valueOf(heldBy).isBlank()) {
+		String holderName = String.valueOf(heldBy).trim();
+		world.getAgent(holderName).ifPresent(agent -> {
+			LinkedHashSet<String> inv = getInventorySet(agent);
+			inv.add(objectId);
+			refreshAgentCarriedItems(agent);
+		});
+	}
+
+	return instance.toMap();
+    }
+
+    public Map<String, Object> patchObjectProperties(String objectId, Map<String, Object> patch) {
+	WorldObjectInstance instance = objectInstances.get(objectId);
+	if (instance == null) {
+	    throw new SmallvilleException("Unknown object id: " + objectId);
+	}
+	if (patch != null) {
+	    instance.properties.putAll(patch);
+	}
 	return instance.toMap();
     }
 
@@ -1506,9 +1617,12 @@ public class SimulationService {
 		actions.add(buildObjectAffordanceAction("Inspect", object, distance,
 			"Inspecting " + object.name, "observant"));
 
-		if (asBoolean(properties.get("writable"), false)) {
+		// Write: any interactive object is writable if actor has a writing tool,
+		// unless explicitly marked hard_to_write_on.
+		boolean hardToWrite = asBoolean(properties.get("hard_to_write_on"), false);
+		if (!hardToWrite && actorHasGrant(actor, "writing_utensil")) {
 			actions.add(buildObjectAffordanceAction("Write On", object, distance,
-				"Writing on " + object.name, "creative"));
+				"Writing on " + object.name, "action:write"));
 		}
 		if (asBoolean(properties.get("flat_surface"), false) && !getInventorySet(actor).isEmpty()) {
 			actions.add(buildObjectAffordanceAction("Place Object", object, distance,
@@ -1540,12 +1654,17 @@ public class SimulationService {
 			|| containsTag(properties, "door");
 		if (isDoorLike) {
 			boolean open = asBoolean(properties.get("doorOpen"), true);
+			boolean locked = asBoolean(properties.get("locked"), false);
 			if (open) {
 				actions.add(buildObjectAffordanceAction("Close Door", object, distance,
 					"Closing door at " + object.name, "close door"));
-			} else {
+			} else if (!locked) {
 				actions.add(buildObjectAffordanceAction("Open Door", object, distance,
 					"Opening door at " + object.name, "open door"));
+			} else if (locked && actorHasGrant(actor, "key")) {
+				// Only offer unlock if actor has a key item
+				actions.add(buildObjectAffordanceAction("Unlock Door", object, distance,
+					"Unlocking door at " + object.name, "unlock"));
 			}
 		}
 
@@ -1712,7 +1831,7 @@ public class SimulationService {
 	    }
 
 	    boolean dayStart = request.isForceDayStart() || state.lastRoutineDate == null || !state.lastRoutineDate.equals(nowDate);
-	    if (dayStart) {
+	    if (dayStart && !agent.hasPendingActions()) {
 		try {
 		    prompts.refreshAgentForNewDay(agent);
 		    state.lastRoutineDate = nowDate;
@@ -1725,7 +1844,7 @@ public class SimulationService {
 		    deterministicUpdated.add(agent.getFullName());
 		    traceTrackedAgent(agent, state, "after-day-start-fallback");
 		}
-	    } else {
+	    } else if (!dayStart) {
 		ReactiveEvent event = pollReactiveEvent(agent.getFullName());
 		if (event != null) {
 		    boolean shouldLlmReact = shouldTriggerLlmReaction(event, isAware);
@@ -1754,6 +1873,9 @@ public class SimulationService {
 
 	    runAgenticLoop(agent, state, now, request, lastPlayerAction);
 	    }
+
+	    // Advance action queue: promote queued→active, then process movement/activity
+	    advanceAgentMovement(agent);
 
 	    // Mark agent as orchestrated after first movement pass
 	    agent.setHasBeenOrchestrated(true);
@@ -1800,9 +1922,6 @@ public class SimulationService {
 	return distance <= radiusTiles;
     }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
 	private boolean isTrackedAgent(Agent agent) {
 		return agent != null
 			&& agent.getFullName() != null
@@ -2034,6 +2153,7 @@ public class SimulationService {
 
 			int dist = tileManhattanDistance(agent.getX(), agent.getY(), cx, cy);
 			if (dist > AGENTIC_SOCIAL_AWARENESS_TILE_DISTANCE) continue;
+			if (!hasLineOfSight(agent.getX(), agent.getY(), cx, cy)) continue;
 
 			PerceptionEntry entry = new PerceptionEntry();
 			entry.entityId   = candidate.getFullName();
@@ -2055,6 +2175,7 @@ public class SimulationService {
 			if (dist > AGENTIC_SOCIAL_AWARENESS_TILE_DISTANCE) {
 				continue;
 			}
+			if (!hasLineOfSight(agent.getX(), agent.getY(), object.x, object.y)) continue;
 			PerceptionEntry entry = new PerceptionEntry();
 			entry.entityId = object.id;
 			entry.entityType = "object";
@@ -2309,7 +2430,14 @@ public class SimulationService {
 		goal.actionType = candidate.actionType;
 		goal.actionDescription = candidate.actionDescription;
 		goal.actionFlair = candidate.actionFlair;
-		goal.topic = "SOCIAL_CONTACT".equals(goal.type) ? buildConversationTopic(agent) : candidate.actionDescription;
+		if ("SOCIAL_CONTACT".equals(goal.type)) {
+			goal.topic = buildConversationTopic(agent, candidate.targetId);
+			// Generate the opener now — before the approach — so the agent "knows what to say"
+			// as they walk over, rather than constructing it at the last second.
+			goal.opener = generateSocialOpener(agent, candidate.targetId, goal.topic);
+		} else {
+			goal.topic = candidate.actionDescription;
+		}
 		goal.description = "goal from tools/personality: " + candidate.actionDescription + " -> " + candidate.targetId;
 		goal.priority = candidate.score;
 		return goal;
@@ -2473,13 +2601,28 @@ public class SimulationService {
 			}
 
 			String lower = actionDesc.toLowerCase();
-			if (("entrance_anchor".equalsIgnoreCase(objectTarget.type)
+			if (flair.contains("action:unlock") || (lower.contains("unlock") && !lower.contains("lock"))) {
+				objectTarget.properties.put("locked", false);
+				objectTarget.properties.put("passable", true);
+				actionDesc = "unlocked " + objectTarget.name;
+			} else if (flair.contains("action:lock") || lower.startsWith("lock") || lower.contains(" lock")) {
+				objectTarget.properties.put("locked", true);
+				objectTarget.properties.put("passable", false);
+				actionDesc = "locked " + objectTarget.name;
+			} else if ("entrance_anchor".equalsIgnoreCase(objectTarget.type)
+				|| asBoolean(objectTarget.properties.get("transition_point"), false)
 				|| containsTag(objectTarget.properties, "entrance")
-				|| containsTag(objectTarget.properties, "door"))) {
+				|| containsTag(objectTarget.properties, "door")) {
 				if (lower.contains("close")) {
+					objectTarget.properties.put("locked", true);
+					objectTarget.properties.put("passable", false);
 					objectTarget.properties.put("doorOpen", false);
+					actionDesc = "closed " + objectTarget.name;
 				} else if (lower.contains("open")) {
+					objectTarget.properties.put("locked", false);
+					objectTarget.properties.put("passable", true);
 					objectTarget.properties.put("doorOpen", true);
+					actionDesc = "opened " + objectTarget.name;
 				}
 			}
 
@@ -2492,6 +2635,27 @@ public class SimulationService {
 				if (placed != null) {
 					actionDesc = "placed " + placed.name + " near " + objectTarget.name;
 				}
+			}
+
+			// Write — agent generates text via LLM and stores it on the object
+			if (flair.contains("action:write") || lower.startsWith("write") || lower.contains("writing on")) {
+				if (objectTarget.properties == null) objectTarget.properties = new HashMap<>();
+				String written = generateAgentWritingContent(agent, objectTarget);
+				objectTarget.properties.put("has_writing", written);
+				actionDesc = "wrote on " + objectTarget.name + ": \"" + written + "\"";
+			}
+
+			// Study — calms agent and adds a memory observation
+			if (flair.contains("action:study") || lower.startsWith("stud")) {
+				agent.applyStressChange(-0.03);
+				agent.getMemoryStream().add(new Observation("Studied " + objectTarget.name));
+				actionDesc = "studied " + objectTarget.name;
+			}
+
+			// Light — torch/illuminate action (cosmetic, small stress relief)
+			if (flair.contains("action:light") || lower.startsWith("illuminat") || lower.startsWith("light")) {
+				agent.applyStressChange(-0.01);
+				actionDesc = "lit " + objectTarget.name;
 			}
 
 			agent.setCurrentActivity("agentic: " + actionDesc);
@@ -2518,10 +2682,32 @@ public class SimulationService {
 		enterCooldown(state, now, "tool_action", 4);
 	}
 
+	/** Generates context-appropriate writing content for an agent writing on an object. */
+	private String generateAgentWritingContent(Agent agent, WorldObjectInstance target) {
+		try {
+			String contextPrompt = "You are " + agent.getFullName() + ". You are writing on " + target.name
+				+ ". Based on your current activity (\"" + agent.getCurrentActivity() + "\") and personality, "
+				+ "write 1-2 concise sentences that fit what your character would write here. Be in-character.";
+			String written = prompts.ask(agent, contextPrompt);
+			if (written != null && !written.isBlank()) {
+				String clean = written.trim();
+				if (clean.length() > 280) clean = clean.substring(0, 280);
+				return clean;
+			}
+		} catch (Exception e) {
+			LOG.warn("Failed to generate agent writing content: {}", e.getMessage());
+		}
+		return agent.getFullName() + " was here.";
+	}
+
 	/** Executes a SOCIAL_CONTACT interaction: creates a conversation opener and waits for outcome. */
 	private void executeSocialContactInteraction(Agent agent, Agent target, AgenticGoal goal,
 			AgenticRuntimeState state, LocalDateTime now) {
-		String opener = sanitizeDialogueText(buildPersonalityOpening(agent, target, goal.topic));
+		// Use the opener generated at goal-commit time (when the agent decided to approach).
+		// Fall back to template only if the stored opener is missing (shouldn't happen in normal flow).
+		String opener = (goal.opener != null && !goal.opener.isBlank())
+			? goal.opener
+			: sanitizeDialogueText(buildPersonalityOpening(agent, target, goal.topic));
 		if (opener != null && !opener.isBlank()) {
 			List<Dialog> lines = new ArrayList<>();
 			lines.add(new Dialog(agent.getFullName(), opener));
@@ -3070,20 +3256,34 @@ public class SimulationService {
 	}
 
 	private String buildConversationTopic(Agent agent) {
+		return buildConversationTopic(agent, null);
+	}
+
+	private String buildConversationTopic(Agent agent, String targetName) {
 		if (agent == null) {
 			return null;
 		}
-		// Pull the most recent substantive observation as a conversation seed
+		// Pull the most recent substantive observation as a conversation seed,
+		// preferring memories that mention the target if one is given.
 		List<Memory> memories = agent.getMemoryStream().getMemories();
+		String lowerTarget = targetName != null ? targetName.toLowerCase() : "";
+		// First pass: memories that mention the target
+		if (!lowerTarget.isBlank()) {
+			for (int i = memories.size() - 1; i >= Math.max(0, memories.size() - 12); i--) {
+				String desc = memories.get(i).getDescription();
+				if (desc != null && !isSystemMemory(desc) && desc.length() > 12
+						&& desc.toLowerCase().contains(lowerTarget)) {
+					String cleaned = sanitizeConversationTopic(desc);
+					if (!cleaned.isBlank()) return cleaned;
+				}
+			}
+		}
+		// Second pass: any recent substantive non-system memory
 		for (int i = memories.size() - 1; i >= Math.max(0, memories.size() - 6); i--) {
 			String desc = memories.get(i).getDescription();
-			if (desc != null && desc.length() > 12
-					&& !desc.toLowerCase().contains("agentic")
-					&& !desc.toLowerCase().contains("initiated conversation")) {
+			if (desc != null && !isSystemMemory(desc) && desc.length() > 12) {
 				String cleaned = sanitizeConversationTopic(desc);
-				if (!cleaned.isBlank()) {
-					return cleaned;
-				}
+				if (!cleaned.isBlank()) return cleaned;
 			}
 		}
 		// Fall back to the agent's current scheduled activity if meaningful
@@ -3093,15 +3293,89 @@ public class SimulationService {
 				&& !activity.toLowerCase().contains("idle")
 				&& !activity.toLowerCase().contains("routine")) {
 			String cleaned = sanitizeConversationTopic(activity);
-			if (!cleaned.isBlank()) {
-				return cleaned;
-			}
+			if (!cleaned.isBlank()) return cleaned;
 		}
 		// Personality-based default topic
 		if (agent.getCompassion() >= 0.65) return "how things have been going";
 		if (agent.getSocialDominance() >= 0.7) return "something on my mind";
 		if (agent.getRiskTolerance() >= 0.6) return "something unusual I've noticed lately";
 		return "recent happenings around here";
+	}
+
+	/** Returns true for system-generated memory strings that should never surface as conversation topics. */
+	private boolean isSystemMemory(String desc) {
+		if (desc == null) return true;
+		String lower = desc.toLowerCase().stripLeading();
+		return lower.startsWith("executed action:")
+			|| lower.startsWith("instinct response:")
+			|| lower.startsWith("deterministic response:")
+			|| lower.startsWith("agentic ")
+			|| lower.contains("initiated conversation")
+			|| lower.startsWith("going to ")
+			|| lower.startsWith("following routine");
+	}
+
+	/**
+	 * Generates a natural conversation opener via LLM at the moment the agent commits to
+	 * approaching the target. Falls back to the personality template on any LLM failure.
+	 */
+	private String generateSocialOpener(Agent agent, String targetName, String topic) {
+		Agent target = world.getAgent(targetName).orElse(null);
+		// Gather up to 3 relevant memories (target-related, then any recent non-system)
+		List<String> relevantMemories = new ArrayList<>();
+		List<Memory> memories = agent.getMemoryStream().getMemories();
+		String lowerTarget = targetName != null ? targetName.toLowerCase() : "";
+		for (int i = memories.size() - 1; i >= Math.max(0, memories.size() - 15) && relevantMemories.size() < 3; i--) {
+			String d = memories.get(i).getDescription();
+			if (d != null && !isSystemMemory(d) && d.length() > 8
+					&& (lowerTarget.isBlank() || d.toLowerCase().contains(lowerTarget))) {
+				relevantMemories.add(d);
+			}
+		}
+
+		StringBuilder prompt = new StringBuilder();
+		prompt.append("You are ").append(agent.getFullName()).append(".\n");
+		String personality = describePersonality(agent);
+		if (!personality.isBlank()) {
+			prompt.append("Your personality: ").append(personality).append(".\n");
+		}
+		if (!relevantMemories.isEmpty()) {
+			prompt.append("Things on your mind: ").append(String.join("; ", relevantMemories)).append(".\n");
+		}
+		if (topic != null && !topic.isBlank()) {
+			prompt.append("You want to talk to ").append(targetName).append(" about: ").append(topic).append(".\n");
+		} else {
+			prompt.append("You want to greet or chat briefly with ").append(targetName).append(".\n");
+		}
+		prompt.append("Write exactly ONE sentence — the first thing you would actually say. ");
+		prompt.append("Sound natural for your personality. No quotes, no stage directions, no extra explanation.");
+
+		try {
+			String raw = prompts.sendRawPrompt(prompt.toString(), 0.85);
+			String cleaned = sanitizeDialogueText(raw);
+			if (cleaned != null && !cleaned.isBlank() && cleaned.length() <= 220) {
+				return cleaned;
+			}
+		} catch (Exception e) {
+			LOG.warn("[Agentic] LLM opener failed for {} → {}: {}", agent.getFullName(), targetName, e.getMessage());
+		}
+		return sanitizeDialogueText(buildPersonalityOpening(agent, target, topic));
+	}
+
+	private String describePersonality(Agent agent) {
+		List<String> traits = new ArrayList<>();
+		if (agent.getCompassion() >= 0.65) traits.add("compassionate");
+		if (agent.getSocialDominance() >= 0.7) traits.add("assertive");
+		if (agent.getFearfulness() >= 0.7) traits.add("anxious");
+		if (agent.getImpulsivity() >= 0.7) traits.add("impulsive");
+		if (agent.getAggression() >= 0.6) traits.add("direct");
+		if (agent.getLoyalty() >= 0.7) traits.add("loyal");
+		if (agent.getRiskTolerance() >= 0.6) traits.add("bold");
+		String base = agent.getTraits() != null && !agent.getTraits().isBlank() ? agent.getTraits() : "";
+		if (!traits.isEmpty()) {
+			base = (base.isBlank() ? "" : base + "; ") + String.join(", ", traits);
+		}
+		return base;
 	}
 
 	private String sanitizeConversationTopic(String raw) {
@@ -3126,35 +3400,26 @@ public class SimulationService {
 		return Math.max(0.0, Math.min(1.0, value));
 	}
 
-    private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
-	InstinctDecision decision = evaluateInstinctDecision(agent, event);
-	if (decision != null) {
-	    agent.applyStressChange(decision.stressDelta);
-	    recordStressEventIfSignificant(agent, event.description);
-	    agent.setCurrentActivity(sanitizeActivityText(decision.activity));
-	    if (decision.targetLocation != null && !decision.targetLocation.isBlank()) {
-		agent.setTargetLocation(decision.targetLocation);
-	    }
-	    recordCommittedAction(agent, decision.action, decision.reason);
-	    agent.getMemoryStream().add(new Observation("Instinct response: " + decision.action + " because " + decision.reason));
-	    return;
+	private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
+		InstinctDecision decision = evaluateInstinctDecision(agent, event);
+		if (decision != null) {
+			agent.applyStressChange(decision.stressDelta);
+			recordStressEventIfSignificant(agent, event.description);
+			agent.setCurrentActivity(sanitizeActivityText(decision.activity));
+			if (decision.targetLocation != null && !decision.targetLocation.isBlank()) {
+				agent.setTargetLocation(decision.targetLocation);
+			}
+			recordCommittedAction(agent, decision.action, decision.reason);
+			agent.getMemoryStream().add(new Observation("Instinct response: " + decision.action + " because " + decision.reason));
+			return;
+		}
+		// Fallback when no instinct decision matched
+		agent.applyStressChange(Math.min(0.25, event.severity * 0.02));
+		recordStressEventIfSignificant(agent, event.description);
+		agent.setCurrentActivity("processing event");
+		recordCommittedAction(agent, "PROCESS_EVENT", event.description);
+		agent.getMemoryStream().add(new Observation("Deterministic response: " + event.description));
 	}
-
-=======
-	private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
-	private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
-	private void applyDeterministicReactiveFallback(Agent agent, ReactiveEvent event) {
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
-	agent.applyStressChange(Math.min(0.25, event.severity * 0.02));
-	recordStressEventIfSignificant(agent, event.description);
-	agent.setCurrentActivity("processing event");
-	recordCommittedAction(agent, "PROCESS_EVENT", event.description);
-	agent.getMemoryStream().add(new Observation("Deterministic response: " + event.description));
-    }
 
     private void applyDeterministicCatchUp(Agent agent, boolean awareToPlayer) {
 	if (!awareToPlayer) {
@@ -3433,9 +3698,6 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 	}
 
 	private void applyScheduledActivity(Agent agent) {
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
 		LocalDateTime now = SimulationTime.now();
 		List<io.github.nickm980.smallville.memory.Commitment> commitments = agent.getMemoryStream()
 			.getPlans(io.github.nickm980.smallville.memory.PlanType.COMMITMENT).stream()
@@ -3513,44 +3775,23 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		}
 
 		// No active commitment; fall back to short-term plan selection
-=======
 		if (agent.hasPendingActions()) {
 			return;
 		}
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
 		if (agent.hasPendingActions()) {
 			return;
 		}
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
-		if (agent.hasPendingActions()) {
-			return;
-		}
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
 		Plan currentPlan = findCurrentPlan(agent);
 		if (currentPlan == null) {
 			return;
 		}
 
 		String description = currentPlan.getDescription();
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-		String activity = sanitizeActivityText(stripLeadingTime(description));
-		if (!activity.isBlank()) {
-			agent.setCurrentActivity(activity);
+		String activity = stripLeadingTime(description);
+		String sanitizedActivity = sanitizeActivityText(activity);
+		if (!sanitizedActivity.isBlank()) {
+			agent.setCurrentActivity(sanitizedActivity);
 		}
-
-=======
-		String activity = stripLeadingTime(description);
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
-		String activity = stripLeadingTime(description);
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
-		String activity = stripLeadingTime(description);
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
 		Location scheduledLocation = findMentionedLocation(description);
 		queuePlannedActions(agent, activity, scheduledLocation);
 	}
@@ -3629,9 +3870,6 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		return match;
 	}
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
 	private boolean isAgentWithinLocationBounds(Agent agent, Location location) {
 		if (agent == null || location == null) {
 			return false;
@@ -3655,9 +3893,11 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			setTrackedAgentName(null);
 		}
 		return removedAgents;
-=======
+	}
+
 	private void advanceAgentMovement(Agent agent) {
 		AgentAction activeAction = agent.getActiveAction();
+		boolean justPromoted = (activeAction == null);
 		if (activeAction == null) {
 			activeAction = agent.startNextAction();
 		}
@@ -3704,53 +3944,10 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			return;
 		}
 
-		completeWorldAction(agent, activeAction);
-	}
-
-=======
-	private void advanceAgentMovement(Agent agent) {
-		AgentAction activeAction = agent.getActiveAction();
-		if (activeAction == null) {
-			activeAction = agent.startNextAction();
-		}
-		if (activeAction == null) {
-			if (agent.hasBeenOrchestrated()) {
-				stepAgentRoutine(agent);
-			}
-			return;
-		}
-
-		if (activeAction.getEmoji() != null && !activeAction.getEmoji().isBlank()) {
-			agent.setCurrentEmoji(activeAction.getEmoji());
-		}
-		if (activeAction.getDescription() != null && !activeAction.getDescription().isBlank()) {
-			agent.setCurrentActivity(activeAction.getDescription());
-		}
-
-		String type = activeAction.getType() == null ? "activity" : activeAction.getType().toLowerCase();
-		if ("move".equals(type)) {
-			if (!agent.hasBeenOrchestrated()) {
-				return;
-			}
-			Location targetLocation = resolveTargetLocation(agent, activeAction);
-			if (targetLocation == null) {
-				agent.completeActiveAction();
-				return;
-			}
-			double targetX;
-			double targetY;
-			if (activeAction.getTargetX() != null && activeAction.getTargetY() != null) {
-				targetX = snapToTile(clamp(activeAction.getTargetX(), targetLocation.getMinX(), targetLocation.getMaxX()));
-				targetY = snapToTile(clamp(activeAction.getTargetY(), targetLocation.getMinY(), targetLocation.getMaxY()));
-			} else if (agent.getLocation() != null && targetLocation.getFullPath().equals(agent.getLocation().getFullPath())) {
-				targetX = snapToTile(targetLocation.getCenterX());
-				targetY = snapToTile(targetLocation.getCenterY());
-			} else {
-				targetX = snapToTile(clamp(agent.getX(), targetLocation.getMinX(), targetLocation.getMaxX()));
-				targetY = snapToTile(clamp(agent.getY(), targetLocation.getMinY(), targetLocation.getMaxY()));
-			}
-			boolean arrived = stepAgentToward(agent, targetX, targetY, targetLocation);
-			if (arrived) {
+		if ("activity".equals(type)) {
+			// Activity actions persist for one full turn before completing,
+			// so the client can observe the active action in the turn it starts.
+			if (!justPromoted) {
 				agent.completeActiveAction();
 			}
 			return;
@@ -3759,60 +3956,30 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		completeWorldAction(agent, activeAction);
 	}
 
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
-	private void advanceAgentMovement(Agent agent) {
-		AgentAction activeAction = agent.getActiveAction();
-		if (activeAction == null) {
-			activeAction = agent.startNextAction();
-		}
-		if (activeAction == null) {
-			if (agent.hasBeenOrchestrated()) {
-				stepAgentRoutine(agent);
-			}
+	private void stepAgentRoutine(Agent agent) {
+		Location current = agent.getLocation();
+		if (current == null) {
 			return;
 		}
-
-		if (activeAction.getEmoji() != null && !activeAction.getEmoji().isBlank()) {
-			agent.setCurrentEmoji(activeAction.getEmoji());
+		int directionSeed = Math.floorMod((agent.getFullName() + SimulationTime.now().toString()).hashCode(), 4);
+		double nextX = agent.getX();
+		double nextY = agent.getY();
+		switch (directionSeed) {
+			case 0: nextX += TILE_SIZE; break;
+			case 1: nextX -= TILE_SIZE; break;
+			case 2: nextY += TILE_SIZE; break;
+			default: nextY -= TILE_SIZE; break;
 		}
-		if (activeAction.getDescription() != null && !activeAction.getDescription().isBlank()) {
-			agent.setCurrentActivity(activeAction.getDescription());
-		}
-
-		String type = activeAction.getType() == null ? "activity" : activeAction.getType().toLowerCase();
-		if ("move".equals(type)) {
-			if (!agent.hasBeenOrchestrated()) {
-				return;
-			}
-			Location targetLocation = resolveTargetLocation(agent, activeAction);
-			if (targetLocation == null) {
-				agent.completeActiveAction();
-				return;
-			}
-			double targetX;
-			double targetY;
-			if (activeAction.getTargetX() != null && activeAction.getTargetY() != null) {
-				targetX = snapToTile(clamp(activeAction.getTargetX(), targetLocation.getMinX(), targetLocation.getMaxX()));
-				targetY = snapToTile(clamp(activeAction.getTargetY(), targetLocation.getMinY(), targetLocation.getMaxY()));
-			} else if (agent.getLocation() != null && targetLocation.getFullPath().equals(agent.getLocation().getFullPath())) {
-				targetX = snapToTile(targetLocation.getCenterX());
-				targetY = snapToTile(targetLocation.getCenterY());
-			} else {
-				targetX = snapToTile(clamp(agent.getX(), targetLocation.getMinX(), targetLocation.getMaxX()));
-				targetY = snapToTile(clamp(agent.getY(), targetLocation.getMinY(), targetLocation.getMaxY()));
-			}
-			boolean arrived = stepAgentToward(agent, targetX, targetY, targetLocation);
-			if (arrived) {
-				agent.completeActiveAction();
-			}
+		nextX = snapToTile(clamp(nextX, current.getMinX(), current.getMaxX()));
+		nextY = snapToTile(clamp(nextY, current.getMinY(), current.getMaxY()));
+		if (toTile(nextX) == toTile(agent.getX()) && toTile(nextY) == toTile(agent.getY())) {
 			return;
 		}
-
-		completeWorldAction(agent, activeAction);
+		if (!isTileOccupiedByOtherAgent(nextX, nextY, agent)) {
+			agent.setPosition(nextX, nextY);
+		}
 	}
 
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
 	private Location resolveTargetLocation(Agent agent, AgentAction action) {
 		String targetName = action.getTargetLocation();
 		if (targetName == null || targetName.isBlank()) {
@@ -3834,7 +4001,6 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		}
 
 		return target;
->>>>>>> 09822c1 (Add queued action system for agents)
 	}
 
 	private CreateAgentRequest toCreateAgentRequest(GeneratedAgentBlueprint blueprint) {
@@ -3862,9 +4028,6 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		}
 	}
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
 	private String extractJsonObject(String text) {
 		if (text == null) {
 			return null;
@@ -3961,11 +4124,10 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 					break;
 				}
 			}
-=======
-=======
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
+		}
+		return new ArrayList<>(sanitized);
+	}
+
 	private boolean stepAgentToward(Agent agent, double targetX, double targetY, Location targetLocation) {
 		int currentTileX = toTile(agent.getX());
 		int currentTileY = toTile(agent.getY());
@@ -3980,15 +4142,46 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 				}
 			}
 			return true;
-<<<<<<< HEAD
-<<<<<<< HEAD
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
 		}
-		return new ArrayList<>(sanitized.stream().limit(Math.max(min, max)).collect(Collectors.toList()));
+
+		int dx = Integer.compare(targetTileX, currentTileX);
+		int dy = Integer.compare(targetTileY, currentTileY);
+		double stepX = snapToTile(agent.getX() + (dx * TILE_SIZE));
+		double stepY = snapToTile(agent.getY() + (dy * TILE_SIZE));
+
+		boolean prioritizeX = Math.abs(targetTileX - currentTileX) >= Math.abs(targetTileY - currentTileY);
+		List<double[]> candidates = new ArrayList<>();
+		if (prioritizeX) {
+			if (dx != 0) candidates.add(new double[] { stepX, snapToTile(agent.getY()) });
+			if (dy != 0) candidates.add(new double[] { snapToTile(agent.getX()), stepY });
+		} else {
+			if (dy != 0) candidates.add(new double[] { snapToTile(agent.getX()), stepY });
+			if (dx != 0) candidates.add(new double[] { stepX, snapToTile(agent.getY()) });
+		}
+
+		for (double[] candidate : candidates) {
+			double nextX = candidate[0];
+			double nextY = candidate[1];
+			if (isTileOccupiedByOtherAgent(nextX, nextY, agent)) {
+				continue;
+			}
+			Location candidateLocation = findLocationAt(nextX, nextY);
+			if (findBlockingObjectAtTile(candidateLocation != null ? candidateLocation : targetLocation, nextX, nextY) != null) {
+				continue;
+			}
+			agent.setPosition(nextX, nextY);
+			Location locationAtNewPosition = findLocationAt(nextX, nextY);
+			if (locationAtNewPosition != null) {
+				agent.setLocation(locationAtNewPosition);
+				if (locationAtNewPosition.getFullPath().equals(targetLocation.getFullPath())
+						&& toTile(nextX) == targetTileX && toTile(nextY) == targetTileY) {
+					agent.setTargetLocation(null);
+					return true;
+				}
+			}
+			return false;
+		}
+		return false;
 	}
 
 	private String makeUniqueAgentName(String baseName, Set<String> existingNames) {
@@ -4010,33 +4203,10 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			if (name != null && name.equalsIgnoreCase(candidate)) {
 				return true;
 			}
-<<<<<<< HEAD
-=======
-			agent.setPosition(nextX, nextY);
-			Location locationAtNewPosition = findLocationAt(nextX, nextY);
-			if (locationAtNewPosition != null) {
-				agent.setLocation(locationAtNewPosition);
-				if (locationAtNewPosition.getFullPath().equals(targetLocation.getFullPath())
-						&& toTile(nextX) == targetTileX && toTile(nextY) == targetTileY) {
-					agent.setTargetLocation(null);
-					return true;
-				}
-			}
-			return false;
-<<<<<<< HEAD
-<<<<<<< HEAD
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
 		}
 		return false;
 	}
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
 	private Location resolveGeneratedAgentLocation(String proposedLocation, GenerateAgentRequest request, List<Location> locations) {
 		Location exact = findLocationByName(proposedLocation, locations);
 		if (exact != null) {
@@ -4099,11 +4269,8 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			+ "Additional theme request: " + (request.getPrompt() == null ? "none" : request.getPrompt()) + "\n"
 			+ "Original JSON candidate:\n"
 			+ rawGeneration;
-=======
-=======
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
+	}
+
 	private void completeWorldAction(Agent agent, AgentAction action) {
 		String type = action.getType() == null ? "activity" : action.getType().toLowerCase();
 		if ("pickup".equals(type) && action.getItem() != null && agent instanceof Player player) {
@@ -4119,13 +4286,6 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			agent.setCurrentActivity(action.getDescription());
 		}
 		agent.completeActiveAction();
-<<<<<<< HEAD
-<<<<<<< HEAD
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
 	}
 
 	private boolean isTileOccupiedByOtherAgent(double x, double y, Agent ignoreAgent) {
@@ -4500,29 +4660,17 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		if (actor == null) {
 			return new LinkedHashSet<>();
 		}
-		LinkedHashSet<String> set = inventoryByAgent.computeIfAbsent(actor.getFullName(), k -> new LinkedHashSet<>());
-		if (actor instanceof Player player) {
-			String[] current = player.getInventory();
-			if (current != null) {
-				for (String item : current) {
-					if (item != null && !item.isBlank()) {
-						set.add(item);
-					}
-				}
-			}
-			player.setInventory(set.toArray(new String[0]));
-		}
-		return set;
+		// Legacy string-id inventory for carried world objects.
+		// Agent.inventory (Map<String,InventoryItem>) is the new typed store for tools/keys;
+		// ActionResolver reads that. Both coexist during migration.
+		return inventoryByAgent.computeIfAbsent(actor.getFullName(), k -> new LinkedHashSet<>());
 	}
 
 	private String[] getInventoryArray(Player player) {
 		if (player == null) {
 			return new String[0];
 		}
-		LinkedHashSet<String> set = getInventorySet(player);
-		String[] arr = set.toArray(new String[0]);
-		player.setInventory(arr);
-		return arr;
+		return getInventorySet(player).toArray(new String[0]);
 	}
 
 	private boolean isObjectInInventory(Agent actor, String objectId) {
@@ -4530,6 +4678,50 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			return false;
 		}
 		return getInventorySet(actor).contains(objectId);
+	}
+
+	/**
+	 * Builds an AgentStateResponse for an agent (or player) with their carried inventory
+	 * objects resolved and attached. Use this instead of mapper.fromAgent() for playerState
+	 * in action responses so the client keeps its inventory in sync.
+	 */
+	private AgentStateResponse fromAgentWithInventory(Agent actor) {
+		AgentStateResponse r = mapper.fromAgent(actor);
+		List<Map<String, Object>> invObjects = getInventorySet(actor).stream()
+			.map(id -> objectInstances.get(id))
+			.filter(obj -> obj != null)
+			.map(WorldObjectInstance::toMap)
+			.collect(Collectors.toList());
+		r.setInventoryObjects(invObjects);
+		return r;
+	}
+
+	/**
+	 * Returns true if the actor holds a tool that satisfies the given grant.
+	 * Checks the typed InventoryItem system first, then falls back to the legacy
+	 * world-object inventory using a direct tag match on properties.tags.
+	 * Object definitions on the server are authoritative — if a pencil has
+	 * tags:["writing_utensil"] it satisfies actorHasGrant(actor, "writing_utensil").
+	 */
+	private boolean actorHasGrant(Agent actor, String grant) {
+		if (actor == null || grant == null) return false;
+		// 1. Typed inventory (InventoryItem grants)
+		if (actor.getInventory().values().stream().anyMatch(item -> item.hasGrant(grant))) {
+			return true;
+		}
+		// 2. Legacy inventory: check properties.tags for the exact grant tag
+		String grantLower = grant.toLowerCase();
+		return getInventorySet(actor).stream()
+			.map(id -> objectInstances.get(id))
+			.filter(obj -> obj != null)
+			.anyMatch(obj -> {
+				if (obj.properties != null && containsTag(obj.properties, grantLower)) {
+					return true;
+				}
+				// Name fallback: "house key" contains "key", "pocket knife" contains "knife"
+				String nameLower = obj.name == null ? "" : obj.name.toLowerCase();
+				return nameLower.contains(grantLower);
+			});
 	}
 
 	private boolean isObjectHeld(WorldObjectInstance instance) {
@@ -4553,9 +4745,26 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		object.location = null;
 		object.x = actor.getX();
 		object.y = actor.getY();
+		refreshAgentCarriedItems(actor);
+	}
+
+	/** Keeps agent.carriedItemNames in sync so LLM prompts include current inventory. */
+	private void refreshAgentCarriedItems(Agent actor) {
+		if (actor == null) return;
+		List<String> names = getInventorySet(actor).stream()
+			.map(id -> objectInstances.get(id))
+			.filter(obj -> obj != null)
+			.map(obj -> obj.name)
+			.collect(Collectors.toList());
+		actor.setCarriedItemNames(names);
 	}
 
 	private WorldObjectInstance placeFirstInventoryObjectAt(Agent actor, WorldObjectInstance anchorObject) {
+		return placeInventoryObjectAt(actor, anchorObject, null);
+	}
+
+	/** Places a specific inventory item (by id) at the anchor location; falls back to first item if itemId is null. */
+	private WorldObjectInstance placeInventoryObjectAt(Agent actor, WorldObjectInstance anchorObject, String itemId) {
 		if (actor == null) {
 			return null;
 		}
@@ -4563,7 +4772,12 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		if (inv.isEmpty()) {
 			return null;
 		}
-		String objectId = inv.iterator().next();
+		String objectId;
+		if (itemId != null && !itemId.isBlank() && inv.contains(itemId)) {
+			objectId = itemId;
+		} else {
+			objectId = inv.iterator().next();
+		}
 		WorldObjectInstance held = objectInstances.get(objectId);
 		if (held == null) {
 			inv.remove(objectId);
@@ -4582,7 +4796,75 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		}
 		held.properties.remove("heldBy");
 		inv.remove(objectId);
+		refreshAgentCarriedItems(actor);
 		return held;
+	}
+
+	/**
+	 * Throws an inventory item at a target position/entity.
+	 * Removes the item from actor's inventory, places it at the target tile,
+	 * and applies 1-tile knockback to any entity at the target.
+	 */
+	private String executeThrow(Agent actor, String itemId, double targetX, double targetY, String targetEntityName) {
+		LinkedHashSet<String> inv = getInventorySet(actor);
+		String resolvedItemId = (itemId != null && !itemId.isBlank() && inv.contains(itemId))
+			? itemId : (inv.isEmpty() ? null : inv.iterator().next());
+		if (resolvedItemId == null) return "Nothing to throw";
+
+		WorldObjectInstance thrownItem = objectInstances.get(resolvedItemId);
+		if (thrownItem == null) { inv.remove(resolvedItemId); return "Item not found"; }
+
+		// Remove from inventory, place at target
+		inv.remove(resolvedItemId);
+		thrownItem.x = snapToTile(targetX);
+		thrownItem.y = snapToTile(targetY);
+		thrownItem.location = actor.getLocation() == null ? null : actor.getLocation().getFullPath();
+		if (thrownItem.properties == null) thrownItem.properties = new HashMap<>();
+		thrownItem.properties.remove("heldBy");
+		refreshAgentCarriedItems(actor);
+
+		String desc = "threw " + thrownItem.name;
+
+		// Knockback: push entity 1 tile away from thrower
+		Agent targetEntity = targetEntityName != null && !targetEntityName.isBlank()
+			? world.getAgent(targetEntityName).orElse(null) : null;
+		if (targetEntity != null) {
+			applyKnockback(actor, targetEntity);
+			targetEntity.applyStressChange(0.07);
+			enqueueReactiveEvent(targetEntity.getFullName(), actor.getFullName() + " threw " + thrownItem.name + " and hit them", 7, true);
+			desc += " at " + targetEntity.getFullName();
+		}
+
+		actor.getMemoryStream().add(new Observation(desc));
+		recordCommittedAction(actor, "THROW", desc);
+		return desc;
+	}
+
+	/** Pushes target 1 tile in the direction away from the source, unless the tile is blocked or the target is large/medium. */
+	private void applyKnockback(Agent source, Agent target) {
+		if (source == null || target == null) return;
+		Map<String, Object> targetProps = new HashMap<>();
+		// Don't knock back large/medium entities (we check target's location objects or a size flag)
+		// For now, all humanoid agents can be knocked back
+		double dx = target.getX() - source.getX();
+		double dy = target.getY() - source.getY();
+		double len = Math.sqrt(dx * dx + dy * dy);
+		if (len < 0.001) return;
+		// Quantize direction to cardinal (strongest axis wins)
+		int tx = (int) Math.signum(dx);
+		int ty = (int) Math.signum(dy);
+		if (Math.abs(dx) >= Math.abs(dy)) ty = 0; else tx = 0;
+
+		double tileSize = 32.0;
+		double newX = snapToTile(target.getX() + tx * tileSize);
+		double newY = snapToTile(target.getY() + ty * tileSize);
+
+		// Only apply if destination is not blocked
+		if (findBlockingObjectAtTile(target.getLocation(), newX, newY) == null
+				&& findOccupyingAgentAtTile(target.getLocation(), newX, newY, target) == null) {
+			target.setPosition(newX, newY);
+			target.getMemoryStream().add(new Observation("Was knocked back by " + source.getFullName()));
+		}
 	}
 
 	private WorldObjectInstance findBlockingObjectAtTile(Location location, double x, double y) {
@@ -4604,19 +4886,84 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			if (toTile(obj.x) != tx || toTile(obj.y) != ty) {
 				continue;
 			}
-			boolean walkable = asBoolean(obj.properties.get("walkable"), true);
-			boolean doorLike = containsTag(obj.properties, "door")
-				|| containsTag(obj.properties, "entrance")
-				|| asBoolean(obj.properties.get("can_open_close"), false)
-				|| obj.properties.containsKey("doorOpen");
-			boolean doorOpen = asBoolean(obj.properties.get("doorOpen"), true);
-			if (doorLike && !doorOpen) {
-				return obj;
-			}
-			if (!doorLike && !walkable) {
+			if (isObjectBlockingMovement(obj)) {
 				return obj;
 			}
 		}
 		return null;
+	}
+
+	private boolean isObjectClimbable(WorldObjectInstance obj) {
+		if (obj == null || obj.properties == null) return false;
+		if (!asBoolean(obj.properties.get("flat_surface"), false)) return false;
+		String height = String.valueOf(obj.properties.getOrDefault("height", "")).toLowerCase();
+		return height.equals("low") || height.equals("medium") || height.equals("counter");
+	}
+
+	private boolean isObjectBlockingMovement(WorldObjectInstance obj) {
+		if (obj == null || obj.properties == null) return false;
+		// New vocabulary: passable: false = impassable solid
+		if (obj.properties.containsKey("passable")) {
+			boolean passable = asBoolean(obj.properties.get("passable"), true);
+			if (!passable) return true;
+		}
+		// transition_point (door/gate): blocked when locked
+		if (asBoolean(obj.properties.get("transition_point"), false)) {
+			return asBoolean(obj.properties.get("locked"), false);
+		}
+		// Legacy: doorOpen / can_open_close / door tag
+		boolean doorLike = containsTag(obj.properties, "door")
+			|| containsTag(obj.properties, "entrance")
+			|| asBoolean(obj.properties.get("can_open_close"), false)
+			|| obj.properties.containsKey("doorOpen");
+		if (doorLike) {
+			return !asBoolean(obj.properties.get("doorOpen"), true);
+		}
+		// Legacy: walkable: false
+		return !asBoolean(obj.properties.get("walkable"), true);
+	}
+
+	/**
+	 * Supercover Bresenham LOS — checks every cell the ray passes through,
+	 * including both corner cells on diagonal steps (no corner tunneling).
+	 * Solid non-transparent objects block vision; start tile excluded, end tile visible.
+	 */
+	private boolean hasLineOfSight(double fromX, double fromY, double toX, double toY) {
+		int fx = toTile(fromX), fy = toTile(fromY);
+		int tx = toTile(toX),   ty = toTile(toY);
+		if (fx == tx && fy == ty) return true;
+		if (Math.abs(tx - fx) > 10 || Math.abs(ty - fy) > 10) return false;
+
+		// Build LOS-blocking tile set: solid + not transparent
+		java.util.Set<Long> losSet = new java.util.HashSet<>();
+		for (WorldObjectInstance obj : objectInstances.values()) {
+			if (obj == null || isObjectHeld(obj)) continue;
+			if (!isObjectBlockingMovement(obj)) continue;
+			if (obj.properties != null && asBoolean(obj.properties.get("transparent"), false)) continue;
+			int bx = toTile(obj.x), by = toTile(obj.y);
+			losSet.add(((long) bx << 32) | (by & 0xFFFFFFFFL));
+		}
+
+		int dx = Math.abs(tx - fx), dy = Math.abs(ty - fy);
+		int sx = tx > fx ? 1 : -1, sy = ty > fy ? 1 : -1;
+		int cx = fx, cy = fy;
+		int err = dx - dy;
+		while (cx != tx || cy != ty) {
+			int e2 = 2 * err;
+			boolean stepX = e2 >= -dy;
+			boolean stepY = e2 <= dx;
+			if (stepX && stepY) {
+				// Diagonal — check both corner tiles
+				long kx = ((long)(cx + sx) << 32) | (cy & 0xFFFFFFFFL);
+				long ky = ((long) cx       << 32) | ((cy + sy) & 0xFFFFFFFFL);
+				if (losSet.contains(kx) || losSet.contains(ky)) return false;
+			}
+			if (stepX) { err -= dy; cx += sx; }
+			if (stepY) { err += dx; cy += sy; }
+			if (cx == tx && cy == ty) return true;
+			long key = ((long) cx << 32) | (cy & 0xFFFFFFFFL);
+			if (losSet.contains(key)) return false;
+		}
+		return true;
 	}
 }

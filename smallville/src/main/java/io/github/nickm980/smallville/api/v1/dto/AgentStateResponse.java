@@ -1,6 +1,8 @@
 package io.github.nickm980.smallville.api.v1.dto;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 public class AgentStateResponse {
     private String name;
@@ -10,28 +12,20 @@ public class AgentStateResponse {
     private String object;
     private double x;
     private double y;
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
     private String targetLocation;
-
-=======
-=======
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
     private AgentActionStateResponse activeAction;
     private List<AgentActionStateResponse> queuedActions;
-    
->>>>>>> 09822c1 (Add queued action system for agents)
+    /** Full property data for each carried world-object (mirrors PlayerStateResponse.inventoryObjects). */
+    private List<Map<String, Object>> inventoryObjects = Collections.emptyList();
+
     public String getObject() {
 	return object;
     }
-    
+
     public void setObject(String object) {
 	this.object = object;
     }
-    
+
     public String getName() {
         return name;
     }
@@ -47,11 +41,11 @@ public class AgentStateResponse {
     public String getLocation() {
         return location;
     }
-    
+
     public void setLocation(String location) {
         this.location = location;
     }
-    
+
     public String getEmoji() {
         return emoji;
     }
@@ -75,20 +69,14 @@ public class AgentStateResponse {
         this.y = y;
     }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
     public String getTargetLocation() {
         return targetLocation;
     }
 
     public void setTargetLocation(String targetLocation) {
         this.targetLocation = targetLocation;
-=======
-=======
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
+    }
+
     public AgentActionStateResponse getActiveAction() {
         return activeAction;
     }
@@ -103,13 +91,13 @@ public class AgentStateResponse {
 
     public void setQueuedActions(List<AgentActionStateResponse> queuedActions) {
         this.queuedActions = queuedActions;
-<<<<<<< HEAD
-<<<<<<< HEAD
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c1 (Add queued action system for agents)
-=======
->>>>>>> 09822c11afd15b4786bdf678d923e9849aef3aa2
+    }
+
+    public List<Map<String, Object>> getInventoryObjects() {
+        return inventoryObjects;
+    }
+
+    public void setInventoryObjects(List<Map<String, Object>> inventoryObjects) {
+        this.inventoryObjects = inventoryObjects;
     }
 }
-

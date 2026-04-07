@@ -29,6 +29,7 @@ import io.github.nickm980.smallville.entities.SimulationTime;
 import io.javalin.community.routing.annotations.Endpoints;
 import io.javalin.community.routing.annotations.Get;
 import io.javalin.community.routing.annotations.Param;
+import io.javalin.community.routing.annotations.Patch;
 import io.javalin.community.routing.annotations.Post;
 import io.javalin.http.Context;
 
@@ -374,6 +375,13 @@ public final class SimulationController {
 	public void upsertObjectInstance(Context ctx, @Param("id") String id) {
 	ObjectInstanceUpsertRequest request = ctx.bodyAsClass(ObjectInstanceUpsertRequest.class);
 	ctx.json(service.upsertObjectInstance(id, request));
+	}
+
+	@Patch("/objects/{id}/properties")
+	public void patchObjectProperties(Context ctx, @Param("id") String id) {
+		@SuppressWarnings("unchecked")
+		Map<String, Object> patch = ctx.bodyAsClass(Map.class);
+		ctx.json(service.patchObjectProperties(id, patch));
 	}
 
 	@Get("/objects/{id}")
