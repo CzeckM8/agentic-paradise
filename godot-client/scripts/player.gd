@@ -54,6 +54,13 @@ var _sheet_cols := 12
 var _sheet_rows := 8
 
 func _ready():
+	# Pull avatar selections when entering from menu flow.
+	if GameSession != null:
+		if player_name.strip_edges() == "" or player_name == "Player":
+			player_name = GameSession.player_name if GameSession.player_name.strip_edges() != "" else "Player"
+		if player_sprite_path == "" or player_sprite_path == "res://assets/sprites/agents/04-scout.png":
+			player_sprite_path = GameSession.get_player_sprite_path()
+
 	# ── Set up sprite from sprite sheet ──
 	sprite.region_enabled = true
 	sprite.scale = Vector2(SPRITE_SCALE, SPRITE_SCALE)
