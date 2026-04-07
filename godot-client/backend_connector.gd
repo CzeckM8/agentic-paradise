@@ -48,7 +48,8 @@ var location_overlays: Node2D = null
 var object_overlays: Node2D = null
 var grid_overlay: Node2D = null
 var world_objects: Array = []
-var blocked_tiles: Dictionary = {}
+var blocked_tiles: Dictionary = {}        # movement-blocking tiles
+var los_blocking_tiles: Dictionary = {}  # LOS-blocking tiles (solid + not transparent)
 var active_dialogue_target = ""
 var dialogue_request_in_flight = false
 var context_actions_request_in_flight = false
@@ -57,30 +58,46 @@ var context_last_click_world: Vector2 = Vector2.ZERO
 var context_has_click_focus = false
 var pending_context_followup_action: Dictionary = {}
 var object_interaction_in_last_turn = false
+var carry_action_in_last_turn = false
 var player_has_local_movement = false
 var last_conversation_signature = ""
+## Prevents re-appending the same server dialog line every /turn (full conversation history is replayed).
+var _dialogue_signatures_seen: Dictionary = {}
 var entity_anchors: Dictionary = {}  # name -> Vector2 live node position
 var debug_header_text = "Connecting to backend..."
 var mouse_tile_debug_text = " | Mouse tile: (--, --)"
 var carried_object_id = ""
+var write_panel: Panel = null
+var write_panel_label: Label = null
+var write_panel_input: LineEdit = null
+var _pending_write_action: Dictionary = {}
 
-# Shared-style affordance dictionary: Property -> Actions
-# Keep this aligned with server-side property rules.
+# ── Target-property rules ────────────────────────────────────────────────────
+# Actions available based on what the TARGET object/entity offers.
 var property_action_rules: Dictionary = {
 	"interactive": [
 		{"actionKey": "inspect", "label": "Inspect", "actionType": "interact", "description": "Inspecting"}
 	],
 	"can_talk": [
-		{"actionKey": "talk", "label": "Talk", "actionType": "speak", "description": "Talking with"}
+		{"actionKey": "talk", "label": "Talk", "actionType": "speak", "description": "Talking with",
+		 "maxDistance": 3},
 	],
 	"can_observe": [
 		{"actionKey": "observe", "label": "Observe", "actionType": "interact", "description": "Observing"}
 	],
 	"can_attack": [
-		{"actionKey": "attack", "label": "Attack", "actionType": "attack", "description": "Attacking"}
+		{"actionKey": "attack", "label": "Attack", "actionType": "attack", "description": "Attacking",
+		 "requiresAny": ["weapon", "blade", "knife"]}
 	],
+	# writable surfaces show Write if the actor carries any item tagged "writing_utensil".
+	# tool_action_rules provides Write for all other interactive objects via the same tag check.
 	"writable": [
-		{"actionKey": "write", "label": "Write", "actionType": "interact", "description": "Writing on", "requiresAny": ["writing_utensil", "pen", "pencil", "marker", "paint"]}
+		{"actionKey": "write", "label": "Write", "actionType": "interact", "description": "Writing on",
+		 "requiresAny": ["writing_utensil"]}
+	],
+	# has_writing stores the text string; truthy check catches non-empty strings
+	"has_writing": [
+		{"actionKey": "read", "label": "Read", "actionType": "interact", "description": "Reading"}
 	],
 	"flat_surface": [
 		{"actionKey": "place_object", "label": "Place Object", "actionType": "interact", "description": "Placing object on", "requiresInventory": true}
@@ -88,10 +105,101 @@ var property_action_rules: Dictionary = {
 	"carriable": [
 		{"actionKey": "carry", "label": "Carry", "actionType": "interact", "description": "Carrying"}
 	],
+	"transition_point": [
+		{"actionKey": "unlock", "label": "Unlock", "actionType": "interact", "description": "Unlocking",
+		 "requiresAny": ["key", "lockpick"]},
+		{"actionKey": "lock",   "label": "Lock",   "actionType": "interact", "description": "Locking",
+		 "requiresAny": ["key", "lockpick"]}
+	],
 	"can_open_close": [
-		{"actionKey": "open", "label": "Open", "actionType": "interact", "description": "Opening"},
+		{"actionKey": "open",  "label": "Open",  "actionType": "interact", "description": "Opening"},
 		{"actionKey": "close", "label": "Close", "actionType": "interact", "description": "Closing"}
+	],
+	"climbable": [
+		{"actionKey": "climb", "label": "Climb onto", "actionType": "interact", "description": "Climbing onto"}
+	],
+	"sittable": [
+		{"actionKey": "sit", "label": "Sit", "actionType": "interact", "description": "Sitting at"}
 	]
+}
+
+# ── Subject-property rules ────────────────────────────────────────────────────
+# Actions available because the ACTOR has these physical properties.
+# "targetKinds" restricts which target categories get this action.
+var subject_property_rules: Dictionary = {
+	"has_arms": [
+		{"actionKey": "punch", "label": "Punch", "actionType": "attack",   "description": "Punching",  "targetKinds": ["entity"]},
+		{"actionKey": "shove", "label": "Shove", "actionType": "attack",   "description": "Shoving",   "targetKinds": ["entity"]},
+		{"actionKey": "grab",  "label": "Grab",  "actionType": "interact", "description": "Grabbing",  "targetKinds": ["entity"]},
+	],
+	"has_legs": [
+		{"actionKey": "kick",  "label": "Kick",  "actionType": "attack",   "description": "Kicking",   "targetKinds": ["entity"]},
+	],
+}
+
+# ── Tool-action rules ─────────────────────────────────────────────────────────
+# Each key IS the tag that must appear in a carried item's properties.tags array.
+# Object definitions on the server are authoritative — a pencil defined with
+# tags:["writing_utensil"] satisfies the "writing_utensil" key. No synonym guessing.
+# "targetKinds" restricts which target categories get this action.
+# "targetRequires" requires a specific property on the target (omit for any interactive target).
+var tool_action_rules: Dictionary = {
+	"writing_utensil": [
+		{"actionKey": "write", "label": "Write", "actionType": "interact", "description": "Writing on",
+		 "targetKinds": ["object"]},
+	],
+	"blade": [
+		{"actionKey": "cut",   "label": "Cut",   "actionType": "interact", "description": "Cutting",
+		 "targetKinds": ["object"], "targetRequires": "cuttable"},
+		{"actionKey": "carve", "label": "Carve", "actionType": "interact", "description": "Carving into",
+		 "targetKinds": ["object"], "targetRequires": "carveable"},
+	],
+	"knife": [
+		{"actionKey": "cut",   "label": "Cut",   "actionType": "interact", "description": "Cutting",
+		 "targetKinds": ["object"], "targetRequires": "cuttable"},
+	],
+	"coins": [
+		{"actionKey": "trade", "label": "Trade", "actionType": "interact", "description": "Trading with",
+		 "targetKinds": ["entity"]},
+	],
+	"herbs": [
+		{"actionKey": "heal", "label": "Heal", "actionType": "interact", "description": "Healing",
+		 "targetKinds": ["entity"]},
+		{"actionKey": "apply_herbs", "label": "Apply Herbs", "actionType": "interact", "description": "Applying herbs to",
+		 "targetKinds": ["entity"], "maxDistance": 1},
+	],
+	"medicine": [
+		{"actionKey": "heal", "label": "Heal", "actionType": "interact", "description": "Healing",
+		 "targetKinds": ["entity"]},
+	],
+	"rope": [
+		{"actionKey": "bind", "label": "Bind", "actionType": "attack", "description": "Binding",
+		 "targetKinds": ["entity"]},
+		{"actionKey": "climb_rope", "label": "Climb with Rope", "actionType": "interact", "description": "Climbing with rope",
+		 "targetKinds": ["object"], "targetRequires": "climbable"},
+	],
+	"torch": [
+		{"actionKey": "light", "label": "Light Area", "actionType": "interact", "description": "Illuminating",
+		 "targetKinds": ["object"]},
+	],
+	"lockpick": [
+		{"actionKey": "unlock", "label": "Unlock", "actionType": "interact", "description": "Picking lock on",
+		 "targetKinds": ["object"], "targetRequires": "transition_point"},
+	],
+	"book": [
+		{"actionKey": "study", "label": "Study", "actionType": "interact", "description": "Studying",
+		 "targetKinds": ["object"]},
+	],
+}
+
+# ── Player inherent properties ────────────────────────────────────────────────
+# The player is assumed to always have these physical capabilities.
+# NPCs share these too; they are humanoid defaults.
+var player_inherent_properties: Dictionary = {
+	"has_arms":    true,
+	"has_legs":    true,
+	"has_voice":   true,
+	"is_humanoid": true,
 }
 
 # Save/load file path
@@ -129,32 +237,42 @@ func _ready():
 		_set_loading(true, "Creating world...")
 		await _initialize_new_world()
 
-	# Generate schedules for all agents before allowing play
-	await _bootstrap_agent_schedules()
-
-	# Hide loading overlay — player can now interact
-	_set_loading(false)
-
-	# Fetch locations and do initial state poll now that everything is ready
+	# Fetch world state first so the map is visible in the background
+	# while schedule generation runs.
 	await _fetch_locations_async()
 	await _fetch_state_snapshot_async()
 	if agent_nodes.is_empty():
 		await _fetch_agents_snapshot_async()
-	_fetch_objects()
+	await _fetch_objects_async()
+	# Load player inventory so context menus show correct tool-based actions on first click
+	await _sync_player_inventory_async()
+
+	# Generate schedules — map is now rendered and visible underneath the overlay.
+	await _bootstrap_agent_schedules()
+
+	# Hide loading overlay — world objects (including walls) are now loaded
+	_set_loading(false)
+
+	_create_write_panel()
 	call_deferred("_poll_backend")
 
 func _wait_for_backend_ready() -> bool:
-	"""Verify backend availability and optionally start it via bat file."""
-	var started_backend = false
+	"""Verify backend availability and optionally start it via bat file.
+	Launches start_server.bat immediately (it kills stale port processes itself),
+	then polls until the server responds or the timeout expires."""
+	if auto_start_backend:
+		_set_loading(true, "Starting server (first launch may take ~30s)...")
+		print("Launching start_server.bat...")
+		_start_backend_server()
+
 	for i in range(backend_wait_attempts):
 		if await _ping_backend():
 			print("Backend is reachable")
 			return true
 
-		if auto_start_backend and not started_backend:
-			print("Backend not reachable, attempting start_server.bat...")
-			_start_backend_server()
-			started_backend = true
+		var elapsed = int(i * backend_wait_interval)
+		if auto_start_backend:
+			_set_loading(true, "Waiting for server... (%ds)" % elapsed)
 
 		await get_tree().create_timer(backend_wait_interval).timeout
 
@@ -174,14 +292,28 @@ func _ping_backend() -> bool:
 	return response_code == 200
 
 func _start_backend_server():
-	"""Start the Java backend server"""
-	var server_bat = "C:/Program Files/Git/agentic-paradise/start_server.bat"
-	var pid = OS.create_process("cmd.exe", ["/c", server_bat])
+	"""Start the Java backend via start_server.bat, resolved relative to the project root."""
+	# Project root is one directory up from the godot-client folder.
+	# ProjectSettings.globalize_path("res://") gives the absolute path to godot-client/.
+	var project_dir = ProjectSettings.globalize_path("res://")
+	# Normalize slashes and strip trailing separator
+	project_dir = project_dir.replace("\\", "/").trim_suffix("/")
+	# Walk up one level to the repo root
+	var repo_root = project_dir.get_base_dir()
+	var bat_path = repo_root + "/start_server.bat"
 
+	if not FileAccess.file_exists(bat_path):
+		push_error("[SERVER] start_server.bat not found at: " + bat_path)
+		_set_loading(true, "start_server.bat not found — start server manually")
+		return
+
+	print("[SERVER] Launching: " + bat_path)
+	# Use 'start' so the bat runs in its own console window (required for stdin/pipes)
+	var pid = OS.create_process("cmd.exe", ["/c", "start", "", bat_path])
 	if pid > 0:
-		print("Backend server launch command executed (pid=" + str(pid) + ")")
+		print("[SERVER] Launch command sent (pid=" + str(pid) + ")")
 	else:
-		push_error("Failed to start backend server. Process id: " + str(pid))
+		push_error("[SERVER] Failed to launch start_server.bat (pid=" + str(pid) + ")")
 
 func _reset_simulation_clock_to_noon() -> void:
 	"""Reset simulation time to 12:00 PM for a newly initialized world."""
@@ -247,6 +379,12 @@ func _initialize_new_world():
 		"activity": "Looking around home",
 		"memories": ["I've arrived in this strange town.", "I should explore and meet the locals."]
 	})
+
+	# Fetch agents so agent_nodes is populated for inventory seeding
+	await _fetch_agents_snapshot_async()
+	# Assign randomized starting items to player and agents
+	print("[INIT] Seeding starting inventories...")
+	await _seed_starting_inventories()
 
 	print("[INIT] Initialization complete!")
 
@@ -335,6 +473,76 @@ func _create_location_async(location_name: String, type: String = "generic", bou
 	push_error("Location creation failed for " + location_name + " code: " + str(response_code))
 	return false
 
+func _seed_starting_inventories() -> void:
+	"""Assign a randomized starting loadout to the player and each agent."""
+	var rng = RandomNumberGenerator.new()
+	rng.randomize()
+
+	# Pool of pocket-sized items agents can start with (name, tags)
+	var agent_item_pool = [
+		{"name": "Pencil",        "tags": ["writing_utensil", "pocket_size"], "desc": "A short wooden pencil."},
+		{"name": "Coin Purse",    "tags": ["coins", "currency", "pocket_size"], "desc": "A small leather coin purse."},
+		{"name": "Herb Bundle",   "tags": ["herbs", "medicine", "pocket_size"], "desc": "Dried herbs tied with twine."},
+		{"name": "Pocket Knife",  "tags": ["knife", "blade", "pocket_size"], "desc": "A small folding knife."},
+		{"name": "Tinderbox",     "tags": ["torch", "fire_starter", "pocket_size"], "desc": "Flint and steel in a tin box."},
+		{"name": "Lockpick Set",  "tags": ["lockpick", "key", "pocket_size"], "desc": "A small set of picks."},
+		{"name": "Notebook",      "tags": ["book", "scholarly", "pocket_size"], "desc": "A well-worn notebook."},
+		{"name": "Chalk",         "tags": ["writing_utensil", "pocket_size"], "desc": "A piece of chalk."},
+		{"name": "Rope",          "tags": ["rope", "pocket_size"], "desc": "A coil of thin rope."},
+	]
+
+	# Player always starts with a pencil and coin purse
+	var player_items = [
+		{"name": "Pencil",     "tags": ["writing_utensil", "pocket_size"], "desc": "A short wooden pencil."},
+		{"name": "Coin Purse", "tags": ["coins", "currency", "pocket_size"], "desc": "A small leather coin purse."},
+	]
+	for i in range(player_items.size()):
+		var item = player_items[i]
+		await _upsert_object_instance_async({
+			"id": "inv_player_%d" % i,
+			"type": "pocket_item",
+			"name": item["name"],
+			"x": 224, "y": 720,
+			"location": "home",
+			"properties": {
+				"carriable": true, "pocket_size": true, "passable": true, "height": "low",
+				"tags": item["tags"], "description": item["desc"],
+				"heldBy": player_name
+			}
+		})
+
+	# Each agent gets 1-2 random items
+	var agent_names = agent_nodes.keys()
+	for idx in range(agent_names.size()):
+		var agent = str(agent_names[idx])
+		if agent == player_name:
+			continue
+		var pos = agent_positions.get(agent, {"x": 760.0, "y": 900.0, "location": "town_square"})
+		var count = 1 + (rng.randi() % 2)  # 1 or 2 items
+		var used: Dictionary = {}
+		for j in range(count):
+			var pick_idx = rng.randi() % agent_item_pool.size()
+			# avoid duplicates
+			var tries = 0
+			while used.has(pick_idx) and tries < 10:
+				pick_idx = rng.randi() % agent_item_pool.size()
+				tries += 1
+			used[pick_idx] = true
+			var item = agent_item_pool[pick_idx]
+			await _upsert_object_instance_async({
+				"id": "inv_agent_%d_%d" % [idx, j],
+				"type": "pocket_item",
+				"name": item["name"],
+				"x": float(pos.get("x", 760.0)),
+				"y": float(pos.get("y", 900.0)),
+				"location": str(pos.get("location", "town_square")),
+				"properties": {
+					"carriable": true, "pocket_size": true, "passable": true, "height": "low",
+					"tags": item["tags"], "description": item["desc"],
+					"heldBy": agent
+				}
+			})
+
 func _seed_world_objects() -> void:
 	"""Create baseline object types and location objects/anchors for the current world."""
 	var type_definitions = _get_default_object_type_definitions()
@@ -351,6 +559,9 @@ func _seed_world_objects() -> void:
 	# Seed building perimeter wall tiles so agents respect building walls and only
 	# enter through registered entrance_anchor door tiles.
 	await _seed_building_wall_tiles(objects)
+	# Re-fetch objects immediately so wall tiles are in world_objects and the
+	# blocked_tiles cache is populated before any movement is possible.
+	await _fetch_objects_async()
 	await _log_object_count_async("[INIT]")
 
 func _log_object_count_async(prefix: String = "[OBJECTS]") -> void:
@@ -488,8 +699,10 @@ func _seed_building_wall_tiles(seeded_objects: Array) -> void:
 					"y": tile.y,
 					"location": loc_name,
 					"properties": {
-						"interactive": false,
+						"interactive": true,
 						"walkable": false,
+						"writable": true,
+						"transparent": false,
 						"tags": ["wall"]
 					}
 				}
@@ -517,23 +730,30 @@ func _blocked_tile_key(world_position: Vector2) -> String:
 	return str(snapped_pos.x) + "," + str(snapped_pos.y)
 
 func is_coordinate_blocked(world_position: Vector2) -> bool:
-	"""Client-side movement gate using world object properties (server-aligned)."""
+	"""Client-side movement gate. O(1) blocked_tiles cache for everything;
+	fallback scan for transition_point objects whose state may have changed."""
+	var snapped = snap_to_tile(world_position)
+	var key = "%d,%d" % [int(snapped.x), int(snapped.y)]
+	if blocked_tiles.has(key):
+		return true
+	# Targeted scan only for transition_points (doors/gates) — state changes at runtime.
 	var tile = world_to_tile(world_position)
 	for obj in world_objects:
 		if not (obj is Dictionary):
 			continue
-		var obj_tile = world_to_tile(Vector2(float(obj.get("x", 0.0)), float(obj.get("y", 0.0))))
-		if obj_tile != tile:
-			continue
 		var props = obj.get("properties", {})
 		if not (props is Dictionary):
 			continue
-		var walkable = bool(props.get("walkable", true))
-		var door_like = bool(props.get("can_open_close", false)) or props.has("doorOpen") or _contains_tag(props, "door") or _contains_tag(props, "entrance")
-		var door_open = bool(props.get("doorOpen", true))
-		if door_like and not door_open:
-			return true
-		if not door_like and not walkable:
+		var is_transition = bool(props.get("transition_point", false)) \
+			or bool(props.get("can_open_close", false)) \
+			or props.has("doorOpen") \
+			or _contains_tag(props, "door") \
+			or _contains_tag(props, "entrance")
+		if not is_transition:
+			continue
+		if world_to_tile(Vector2(float(obj.get("x", 0.0)), float(obj.get("y", 0.0)))) != tile:
+			continue
+		if _is_object_blocking_movement(props):
 			return true
 	return false
 
@@ -561,37 +781,51 @@ func _compute_perimeter_tiles(min_x: float, max_x: float, min_y: float, max_y: f
 
 func _get_default_object_type_definitions() -> Dictionary:
 	return {
+		# fixtures are solid by default — tables, stages, fountains take up space
 		"fixture": {
 			"anchor": false,
 			"portable": false,
 			"interactive": true,
+			"passable": false,
+			"height": "medium",
 			"interactionMode": "nearby",
 			"interactionRadius": 48,
 			"tags": ["environment"]
 		},
+		# entrance_anchors are transition points — passable when unlocked
 		"entrance_anchor": {
 			"anchor": true,
 			"anchorKind": "entrance",
 			"portable": false,
 			"interactive": true,
+			"passable": true,
+			"transition_point": true,
+			"locked": false,
+			"height": "door",
 			"interactionMode": "nearby",
 			"interactionRadius": 40,
 			"tags": ["entrance", "pathing"]
 		},
+		# idle_zones are walkable floor markers
 		"idle_zone": {
 			"anchor": true,
 			"anchorKind": "idle_zone",
 			"portable": false,
 			"interactive": true,
+			"passable": true,
 			"interactionMode": "nearby",
 			"interactionRadius": 96,
 			"tags": ["ambient", "social"]
 		},
+		# work_spots (counters, bars) are solid — you work adjacent, not on top
 		"work_spot": {
 			"anchor": true,
 			"anchorKind": "work",
 			"portable": false,
 			"interactive": true,
+			"passable": false,
+			"height": "counter",
+			"flat_surface": true,
 			"interactionMode": "adjacent",
 			"interactionRadius": 32,
 			"tags": ["task", "service"]
@@ -600,6 +834,8 @@ func _get_default_object_type_definitions() -> Dictionary:
 			"anchor": false,
 			"portable": true,
 			"interactive": true,
+			"passable": true,
+			"height": "low",
 			"interactionMode": "adjacent",
 			"interactionRadius": 32,
 			"tags": ["decorative", "stealable", "writable"]
@@ -608,10 +844,24 @@ func _get_default_object_type_definitions() -> Dictionary:
 			"anchor": true,
 			"portable": false,
 			"interactive": false,
+			"passable": false,
 			"walkable": false,
 			"interactionMode": "none",
 			"interactionRadius": 0,
 			"tags": ["wall"]
+		},
+		# pocket_items are carryable small objects — anything that fits in a pocket or bag
+		"pocket_item": {
+			"anchor": false,
+			"portable": true,
+			"pocket_size": true,
+			"carriable": true,
+			"interactive": true,
+			"passable": true,
+			"height": "low",
+			"interactionMode": "adjacent",
+			"interactionRadius": 32,
+			"tags": ["pocket_size", "carriable"]
 		}
 	}
 
@@ -623,40 +873,47 @@ func _get_default_world_objects() -> Array:
 		{"id":"street_idle_south","type":"idle_zone","name":"South Sidewalk Flow","x":900,"y":980,"location":"street","properties":{"zoneRadius":120,"pathingHint":true}},
 
 		# Market
-		{"id":"market_entry_street","type":"entrance_anchor","name":"Market Entrance","x":600,"y":260,"location":"market","properties":{"linkedHint":"street","building":"market"}},
-		{"id":"market_counter","type":"work_spot","name":"Produce Counter","x":460,"y":200,"location":"market","properties":{"activity":["sell","buy","trade"],"adjacentPreferred":true}},
-		{"id":"market_crates","type":"fixture","name":"Crate Stack","x":250,"y":300,"location":"market","properties":{"inspectable":true}},
-		{"id":"market_notice_wall","type":"decor","name":"Market Notice Wall","x":120,"y":120,"location":"market","properties":{"writable":true,"graffiti":true}},
+		{"id":"market_entry_street","type":"entrance_anchor","name":"Market Entrance","x":600,"y":260,"location":"market","properties":{"linkedHint":"street","building":"market","transition_point":true,"locked":false,"passable":true}},
+		{"id":"market_counter","type":"work_spot","name":"Produce Counter","x":460,"y":200,"location":"market","properties":{"activity":["sell","buy","trade"],"adjacentPreferred":true,"passable":false,"height":"counter","flat_surface":true}},
+		{"id":"market_crates","type":"fixture","name":"Crate Stack","x":250,"y":300,"location":"market","properties":{"inspectable":true,"passable":false,"height":"medium","description":"A stack of wooden crates, some dented at the corners."}},
+		{"id":"market_notice_wall","type":"decor","name":"Market Notice Wall","x":120,"y":120,"location":"market","properties":{"writable":true,"graffiti":true,"passable":true,"height":"tall","has_writing":"Today's produce: fresh apples, potatoes, dried herbs. Haggling welcome."}},
 		{"id":"market_idle_zone","type":"idle_zone","name":"Market Browsing Zone","x":320,"y":260,"location":"market","properties":{"zoneRadius":100}},
 
 		# Tavern
-		{"id":"tavern_entry_street","type":"entrance_anchor","name":"Tavern Entrance","x":700,"y":230,"location":"tavern","properties":{"linkedHint":"street","building":"tavern"}},
-		{"id":"tavern_bar","type":"work_spot","name":"Bar Counter","x":980,"y":140,"location":"tavern","properties":{"activity":["serve","chat","order"]}},
-		{"id":"tavern_table_a","type":"fixture","name":"Round Table A","x":830,"y":300,"location":"tavern","properties":{"sitAround":true}},
-		{"id":"tavern_table_b","type":"fixture","name":"Round Table B","x":1030,"y":320,"location":"tavern","properties":{"sitAround":true}},
-		{"id":"tavern_wall_sign","type":"decor","name":"Tavern Wall Sign","x":1140,"y":80,"location":"tavern","properties":{"stealable":true,"writable":true}},
+		{"id":"tavern_entry_street","type":"entrance_anchor","name":"Tavern Entrance","x":700,"y":230,"location":"tavern","properties":{"linkedHint":"street","building":"tavern","transition_point":true,"locked":false,"passable":true}},
+		{"id":"tavern_bar","type":"work_spot","name":"Bar Counter","x":980,"y":140,"location":"tavern","properties":{"activity":["serve","chat","order"],"passable":false,"height":"counter","flat_surface":true,"description":"A long wooden bar, its surface worn smooth and faintly sticky."}},
+		{"id":"tavern_table_a","type":"fixture","name":"Round Table A","x":830,"y":300,"location":"tavern","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"comfort":"worn but sturdy"}},
+		{"id":"tavern_table_b","type":"fixture","name":"Round Table B","x":1030,"y":320,"location":"tavern","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"comfort":"a bit wobbly"}},
+		{"id":"tavern_wall_sign","type":"decor","name":"Tavern Wall Sign","x":1140,"y":80,"location":"tavern","properties":{"stealable":true,"writable":true,"passable":true,"height":"tall","has_writing":"The Rusty Flagon — Est. Year 12. No credit. No exceptions."}},
 		{"id":"tavern_idle_zone","type":"idle_zone","name":"Tavern Common Zone","x":920,"y":260,"location":"tavern","properties":{"zoneRadius":110}},
 
 		# Coffee shop
-		{"id":"coffee_entry_street","type":"entrance_anchor","name":"Coffee Shop Entrance","x":1300,"y":210,"location":"coffee_shop","properties":{"linkedHint":"street","building":"coffee_shop"}},
-		{"id":"coffee_machine","type":"work_spot","name":"Espresso Station","x":1680,"y":120,"location":"coffee_shop","properties":{"activity":["brew","calibrate","clean"]}},
-		{"id":"coffee_register","type":"work_spot","name":"Register","x":1580,"y":140,"location":"coffee_shop","properties":{"activity":["charge","serve"]}},
-		{"id":"coffee_table","type":"fixture","name":"Window Table","x":1440,"y":290,"location":"coffee_shop","properties":{"sitAround":true}},
-		{"id":"coffee_bulletin","type":"decor","name":"Community Bulletin Board","x":1335,"y":95,"location":"coffee_shop","properties":{"writable":true,"noteBoard":true}},
+		{"id":"coffee_entry_street","type":"entrance_anchor","name":"Coffee Shop Entrance","x":1300,"y":210,"location":"coffee_shop","properties":{"linkedHint":"street","building":"coffee_shop","transition_point":true,"locked":false,"passable":true}},
+		{"id":"coffee_machine","type":"work_spot","name":"Espresso Station","x":1680,"y":120,"location":"coffee_shop","properties":{"activity":["brew","calibrate","clean"],"passable":false,"height":"counter","flat_surface":true,"description":"A gleaming brass espresso machine, warm to the touch."}},
+		{"id":"coffee_register","type":"work_spot","name":"Register","x":1580,"y":140,"location":"coffee_shop","properties":{"activity":["charge","serve"],"passable":false,"height":"counter","flat_surface":true}},
+		{"id":"coffee_table","type":"fixture","name":"Window Table","x":1440,"y":290,"location":"coffee_shop","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"comfort":"comfortable","description":"A small round table by the window, with two chairs."}},
+		{"id":"coffee_bulletin","type":"decor","name":"Community Bulletin Board","x":1335,"y":95,"location":"coffee_shop","properties":{"writable":true,"noteBoard":true,"passable":true,"height":"tall","has_writing":"Lost cat — answers to Biscuit. Reward offered. Also: open mic night Friday."}},
 		{"id":"coffee_idle_zone","type":"idle_zone","name":"Coffee Lounge Zone","x":1520,"y":250,"location":"coffee_shop","properties":{"zoneRadius":90}},
 
 		# Town square
-		{"id":"square_stage","type":"fixture","name":"Public Stage","x":620,"y":760,"location":"town_square","properties":{"performable":true}},
-		{"id":"square_fountain","type":"fixture","name":"Fountain","x":780,"y":860,"location":"town_square","properties":{"landmark":true}},
-		{"id":"square_notice","type":"decor","name":"Public Notice Wall","x":980,"y":720,"location":"town_square","properties":{"writable":true,"graffiti":true}},
+		{"id":"square_stage","type":"fixture","name":"Public Stage","x":620,"y":760,"location":"town_square","properties":{"performable":true,"passable":false,"height":"low","flat_surface":true,"climbable":true,"description":"A raised wooden platform, scuffed from many performances."}},
+		{"id":"square_fountain","type":"fixture","name":"Fountain","x":780,"y":860,"location":"town_square","properties":{"landmark":true,"passable":false,"height":"medium","description":"A stone fountain, still running. Coins glint at the bottom."}},
+		{"id":"square_notice","type":"decor","name":"Public Notice Wall","x":980,"y":720,"location":"town_square","properties":{"writable":true,"graffiti":true,"passable":true,"height":"tall","has_writing":"Town meeting postponed. Curfew reminder: gates close at dusk."}},
 		{"id":"square_idle_zone","type":"idle_zone","name":"Town Square Gathering","x":760,"y":900,"location":"town_square","properties":{"zoneRadius":140}},
 
 		# Home
-		{"id":"home_entry_street","type":"entrance_anchor","name":"Home Entrance","x":224,"y":620,"location":"home","properties":{"linkedHint":"street","building":"home"}},
-		{"id":"home_bed","type":"work_spot","name":"Bedside","x":170,"y":860,"location":"home","properties":{"activity":["rest","sleep"]}},
-		{"id":"home_kitchen","type":"work_spot","name":"Kitchen Counter","x":250,"y":720,"location":"home","properties":{"activity":["cook","clean"]}},
-		{"id":"home_picture","type":"decor","name":"Framed Picture","x":120,"y":680,"location":"home","properties":{"stealable":true,"writable":false}},
-		{"id":"home_idle_zone","type":"idle_zone","name":"Home Living Area","x":220,"y":800,"location":"home","properties":{"zoneRadius":90}}
+		{"id":"home_entry_street","type":"entrance_anchor","name":"Home Entrance","x":224,"y":620,"location":"home","properties":{"linkedHint":"street","building":"home","transition_point":true,"locked":false,"passable":true}},
+		{"id":"home_bed","type":"work_spot","name":"Bedside","x":170,"y":860,"location":"home","properties":{"activity":["rest","sleep"],"passable":false,"height":"low","flat_surface":true,"climbable":true,"sittable":true,"comfort":"soft","description":"A modest bed with rumpled sheets."}},
+		{"id":"home_kitchen","type":"work_spot","name":"Kitchen Counter","x":250,"y":720,"location":"home","properties":{"activity":["cook","clean"],"passable":false,"height":"counter","flat_surface":true}},
+		{"id":"home_picture","type":"decor","name":"Framed Picture","x":120,"y":680,"location":"home","properties":{"stealable":true,"passable":true,"height":"low","description":"A faded painting of a countryside scene."}},
+		{"id":"home_idle_zone","type":"idle_zone","name":"Home Living Area","x":220,"y":800,"location":"home","properties":{"zoneRadius":90}},
+
+		# Carriable world items — can be picked up and placed
+		{"id":"item_pencil_market","type":"decor","name":"Pencil","x":470,"y":200,"location":"market","properties":{"carriable":true,"passable":true,"height":"low","tags":["writing_utensil","pen"],"description":"A short wooden pencil, worn to a nub."}},
+		{"id":"item_pencil_coffee","type":"decor","name":"Pencil","x":1345,"y":95,"location":"coffee_shop","properties":{"carriable":true,"passable":true,"height":"low","tags":["writing_utensil","pen"],"description":"A pencil left near the bulletin board."}},
+		{"id":"item_knife_tavern","type":"decor","name":"Pocket Knife","x":995,"y":145,"location":"tavern","properties":{"carriable":true,"passable":true,"height":"low","tags":["knife","blade","tool"],"description":"A folding knife with a worn wooden handle."}},
+		{"id":"item_coin_square","type":"decor","name":"Coin Purse","x":790,"y":870,"location":"town_square","properties":{"carriable":true,"passable":true,"height":"low","tags":["coins","currency","valuables"],"description":"A small leather coin purse, a few coins jingling inside."}},
+		{"id":"item_key_home","type":"decor","name":"House Key","x":240,"y":725,"location":"home","properties":{"carriable":true,"passable":true,"height":"low","tags":["key","unlock"],"description":"A brass door key on a simple ring."}}
 	]
 
 # LOCATION FUNCTIONS
@@ -784,36 +1041,151 @@ func _on_locations_received(result, response_code, headers, body, http):
 		push_error("Failed to fetch locations, code: " + str(response_code))
 
 func _fetch_objects():
-	"""GET request to fetch all world objects for visualization."""
+	"""Fire-and-forget GET for world objects (use _fetch_objects_async when order matters)."""
+	_fetch_objects_async()
+
+func _fetch_objects_async() -> void:
+	"""Awaitable fetch: loads world objects then rebuilds the blocked-tile cache."""
 	var http = HTTPRequest.new()
 	add_child(http)
-	http.request_completed.connect(_on_objects_received.bind(http))
-
 	var error = http.request(backend_url + "/objects")
 	if error != OK:
 		push_error("Failed to fetch objects")
-
-func _on_objects_received(result, response_code, headers, body, http):
-	"""Handle object list response and redraw object overlays."""
-	if is_instance_valid(http):
 		http.queue_free()
-
+		return
+	var response = await http.request_completed
+	http.queue_free()
+	var response_code = response[1]
+	var body = response[3]
 	if response_code != 200:
 		push_error("Failed to fetch objects, code: " + str(response_code))
 		return
-
 	var json = JSON.new()
 	if json.parse(body.get_string_from_utf8()) != OK:
 		push_error("Failed to parse objects response JSON")
 		return
-
 	var response_data = json.data
 	if response_data is Dictionary and response_data.has("objects") and response_data.objects is Array:
 		world_objects = response_data.objects
 	else:
 		world_objects = []
-
+	_rebuild_blocked_tiles_cache()
 	_redraw_object_overlays()
+
+func _on_objects_received(result, response_code, headers, body, http):
+	"""Legacy callback kept for any external callers; delegates to async path."""
+	if is_instance_valid(http):
+		http.queue_free()
+	if response_code != 200:
+		push_error("Failed to fetch objects, code: " + str(response_code))
+		return
+	var json = JSON.new()
+	if json.parse(body.get_string_from_utf8()) != OK:
+		push_error("Failed to parse objects response JSON")
+		return
+	var response_data = json.data
+	if response_data is Dictionary and response_data.has("objects") and response_data.objects is Array:
+		world_objects = response_data.objects
+	else:
+		world_objects = []
+	_rebuild_blocked_tiles_cache()
+	_redraw_object_overlays()
+
+func _rebuild_blocked_tiles_cache() -> void:
+	"""Build blocked_tiles (movement) and los_blocking_tiles (vision) from world_objects."""
+	blocked_tiles.clear()
+	los_blocking_tiles.clear()
+	for obj in world_objects:
+		if not (obj is Dictionary):
+			continue
+		if _is_object_held(obj):
+			continue
+		var props = obj.get("properties", {})
+		if not (props is Dictionary):
+			continue
+		var snapped = snap_to_tile(Vector2(float(obj.get("x", 0.0)), float(obj.get("y", 0.0))))
+		var key = "%d,%d" % [int(snapped.x), int(snapped.y)]
+		if _is_object_blocking_movement(props):
+			blocked_tiles[key] = true
+		# LOS blocked by solid non-transparent objects (passable:false and no transparent flag)
+		if _is_object_blocking_los(props):
+			var tile_idx = world_to_tile(snapped)
+			los_blocking_tiles["%d,%d" % [tile_idx.x, tile_idx.y]] = true
+
+func _is_object_blocking_los(props: Dictionary) -> bool:
+	"""True when this object occludes vision. Solid objects without transparent:true block LOS."""
+	if bool(props.get("transparent", false)):
+		return false
+	# Anything that blocks movement also blocks vision
+	return _is_object_blocking_movement(props)
+
+## Supercover Bresenham LOS — checks every cell the ray passes through,
+## including both corner cells on diagonal steps (no tunneling through corners).
+## start tile is excluded; end tile is NOT blocked (you can see things ON a wall tile).
+var los_vision_radius_tiles: int = 10
+
+func has_line_of_sight(from_world: Vector2, to_world: Vector2) -> bool:
+	var ft = world_to_tile(from_world)
+	var tt = world_to_tile(to_world)
+	if ft == tt:
+		return true
+	# Vision radius limit (Chebyshev distance)
+	if abs(tt.x - ft.x) > los_vision_radius_tiles or abs(tt.y - ft.y) > los_vision_radius_tiles:
+		return false
+
+	var dx = abs(tt.x - ft.x)
+	var dy = abs(tt.y - ft.y)
+	var sx = 1 if tt.x > ft.x else -1
+	var sy = 1 if tt.y > ft.y else -1
+	var cx = ft.x
+	var cy = ft.y
+	var err = dx - dy
+
+	while cx != tt.x or cy != tt.y:
+		var e2 = 2 * err
+		var step_x = e2 >= -dy
+		var step_y = e2 <= dx
+		if step_x and step_y:
+			# Diagonal step — check both intermediate corner tiles for occlusion
+			if los_blocking_tiles.has("%d,%d" % [cx + sx, cy]):
+				return false
+			if los_blocking_tiles.has("%d,%d" % [cx, cy + sy]):
+				return false
+		if step_x:
+			err -= dy
+			cx += sx
+		if step_y:
+			err += dx
+			cy += sy
+		# End tile: visible (you can see the wall/door itself)
+		if cx == tt.x and cy == tt.y:
+			return true
+		# Intermediate tile blocked
+		if los_blocking_tiles.has("%d,%d" % [cx, cy]):
+			return false
+	return true
+
+func _is_object_blocking_movement(props: Dictionary) -> bool:
+	"""Canonical blocking check — mirrors server isObjectBlockingMovement."""
+	# New vocab: passable: false = solid impassable
+	if props.has("passable"):
+		if not bool(props.get("passable", true)):
+			return true
+		# passable: true on a non-transition_point means it's walkable floor
+		if not bool(props.get("transition_point", false)):
+			return false
+	# transition_point (door/gate): blocked when locked
+	if bool(props.get("transition_point", false)):
+		return bool(props.get("locked", false))
+	# Legacy: doorOpen / can_open_close / door tag
+	var door_like = bool(props.get("can_open_close", false)) \
+		or props.has("doorOpen") \
+		or _contains_tag(props, "door") \
+		or _contains_tag(props, "entrance")
+	if door_like:
+		return not bool(props.get("doorOpen", true))
+	# Legacy: walkable: false
+	return not bool(props.get("walkable", true))
 
 # AGENT FUNCTIONS
 func _create_agent_async(agent_data) -> void:
@@ -1008,8 +1380,97 @@ func _wire_context_action_ui():
 	if context_action_panel != null:
 		context_action_panel.visible = false
 
+func _create_write_panel() -> void:
+	"""Build the write-text modal panel programmatically."""
+	var ui = get_node("../UI")
+	write_panel = Panel.new()
+	write_panel.name = "WritePanel"
+	write_panel.visible = false
+	write_panel.anchor_left = 0.5
+	write_panel.anchor_top = 0.5
+	write_panel.anchor_right = 0.5
+	write_panel.anchor_bottom = 0.5
+	write_panel.offset_left = -210.0
+	write_panel.offset_top = -72.0
+	write_panel.offset_right = 210.0
+	write_panel.offset_bottom = 72.0
+	ui.add_child(write_panel)
+
+	var vbox = VBoxContainer.new()
+	vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vbox.add_theme_constant_override("separation", 8)
+	var mg = MarginContainer.new()
+	mg.add_theme_constant_override("margin_left", 12)
+	mg.add_theme_constant_override("margin_right", 12)
+	mg.add_theme_constant_override("margin_top", 10)
+	mg.add_theme_constant_override("margin_bottom", 10)
+	mg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	write_panel.add_child(mg)
+	mg.add_child(vbox)
+
+	write_panel_label = Label.new()
+	write_panel_label.text = "Write on object:"
+	write_panel_label.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(write_panel_label)
+
+	write_panel_input = LineEdit.new()
+	write_panel_input.placeholder_text = "What do you write?"
+	write_panel_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	write_panel_input.text_submitted.connect(_on_write_confirm)
+	vbox.add_child(write_panel_input)
+
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	vbox.add_child(hbox)
+
+	var confirm_btn = Button.new()
+	confirm_btn.text = "Write"
+	confirm_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	confirm_btn.pressed.connect(func(): _on_write_confirm(write_panel_input.text))
+	hbox.add_child(confirm_btn)
+
+	var cancel_btn = Button.new()
+	cancel_btn.text = "Cancel"
+	cancel_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cancel_btn.pressed.connect(_on_write_cancel)
+	hbox.add_child(cancel_btn)
+
+func _on_write_confirm(submitted_text: String = "") -> void:
+	"""Send the write action with the player's text."""
+	var text = submitted_text if submitted_text != "" else (write_panel_input.text if write_panel_input != null else "")
+	write_panel.visible = false
+	if text.strip_edges() == "" or _pending_write_action.is_empty():
+		_pending_write_action = {}
+		return
+	var pa = _pending_write_action
+	_pending_write_action = {}
+	close_context_action_panel()
+	object_interaction_in_last_turn = true
+	enqueue_player_action(
+		player_name,
+		"interact",
+		str(pa.get("targetAgent", "")),
+		str(pa.get("location", "")),
+		float(pa.get("playerX", 0.0)),
+		float(pa.get("playerY", 0.0)),
+		"Writing on " + str(pa.get("targetName", "object")),
+		text.strip_edges(),
+		0.1,
+		"",
+		"action:write"
+	)
+
+func _on_write_cancel() -> void:
+	"""Dismiss the write panel without sending an action."""
+	_pending_write_action = {}
+	if write_panel != null:
+		write_panel.visible = false
+
 func is_context_action_open() -> bool:
 	return context_action_panel != null and context_action_panel.visible
+
+func is_write_panel_open() -> bool:
+	return write_panel != null and write_panel.visible
 
 func open_context_action_panel() -> void:
 	if context_actions_request_in_flight:
@@ -1070,24 +1531,86 @@ func _fetch_inventory_async(player_id: String) -> void:
 		return
 
 	var payload = json.data
-	var inv = payload.get("inventory", []) if payload is Dictionary else []
-	if not (inv is Array):
-		inv = []
+	if not (payload is Dictionary):
+		return
 
+	# Use rich object data when available, fall back to plain IDs
+	var inv_objects: Array = payload.get("inventoryObjects", [])
+	if not (inv_objects is Array):
+		inv_objects = []
+
+	# Sync to player node for tool-requirement checks
+	var inv_ids: Array = payload.get("inventory", [])
 	if player_node != null and ("inventory" in player_node):
-		player_node.inventory = inv.duplicate()
+		player_node.inventory = inv_objects.duplicate() if not inv_objects.is_empty() else inv_ids.duplicate()
 
 	if context_action_status != null:
-		context_action_status.text = "Inventory empty" if inv.is_empty() else "Items: %d" % inv.size()
+		context_action_status.text = "Empty" if inv_objects.is_empty() else "%d item(s)" % inv_objects.size()
 
 	if context_action_list == null:
 		return
-	for item in inv:
-		var label = Label.new()
-		label.text = "- " + str(item)
-		label.add_theme_font_size_override("font_size", 12)
-		label.modulate = Color(0.92, 0.96, 0.96, 0.95)
-		context_action_list.add_child(label)
+
+	if inv_objects.is_empty():
+		var empty_label = Label.new()
+		empty_label.text = "(nothing carried)"
+		empty_label.add_theme_font_size_override("font_size", 12)
+		empty_label.modulate = Color(0.7, 0.7, 0.7, 0.9)
+		context_action_list.add_child(empty_label)
+		return
+
+	for item_obj in inv_objects:
+		if not (item_obj is Dictionary):
+			continue
+		var item_id = str(item_obj.get("id", ""))
+		var item_name = str(item_obj.get("name", item_id))
+		var item_props = item_obj.get("properties", {})
+		var item_desc = ""
+		if item_props is Dictionary:
+			item_desc = str(item_props.get("description", "")).strip_edges()
+
+		var row = HBoxContainer.new()
+		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+		var name_label = Label.new()
+		name_label.text = item_name
+		name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		name_label.add_theme_font_size_override("font_size", 12)
+		name_label.modulate = Color(0.95, 0.95, 0.78, 1.0)
+		if item_desc != "" and item_desc.to_lower() != "null":
+			name_label.tooltip_text = item_desc
+		row.add_child(name_label)
+
+		var drop_btn = Button.new()
+		drop_btn.text = "Drop"
+		drop_btn.add_theme_font_size_override("font_size", 11)
+		drop_btn.pressed.connect(_on_inventory_drop_pressed.bind(item_id, item_name))
+		row.add_child(drop_btn)
+
+		context_action_list.add_child(row)
+
+func _on_inventory_drop_pressed(item_id: String, item_name: String) -> void:
+	close_context_action_panel()
+	if player_node == null:
+		return
+	# Mark so post-turn handler refreshes objects and inventory (reveals dropped item in world)
+	object_interaction_in_last_turn = true
+	enqueue_player_action(
+		player_name, "drop", "object:" + item_id,
+		player_node.current_location,
+		player_node.position.x, player_node.position.y,
+		"Dropping " + item_name, "", 0.1, "", "action:drop"
+	)
+	# Optimistic: clear heldBy immediately so the item isn't shown in inventory while waiting
+	for obj in world_objects:
+		if obj is Dictionary and str(obj.get("id", "")) == item_id:
+			var props = obj.get("properties", {})
+			if props is Dictionary:
+				props.erase("heldBy")
+			obj["x"] = player_node.position.x
+			obj["y"] = player_node.position.y
+			break
+	_rebuild_blocked_tiles_cache()
+	_redraw_object_overlays()
 
 func open_context_action_panel_at(world_focus: Vector2) -> void:
 	if context_actions_request_in_flight:
@@ -1097,19 +1620,26 @@ func open_context_action_panel_at(world_focus: Vector2) -> void:
 
 	context_last_click_world = tile_to_world(world_to_tile(world_focus))
 	context_has_click_focus = true
-	var focus_tile = world_to_tile(context_last_click_world)
-
-	if context_action_panel != null:
-		context_action_panel.visible = true
-	if context_action_title != null:
-		context_action_title.text = "Actions @ tile (%d, %d)" % [focus_tile.x, focus_tile.y]
-	if context_action_status != null:
-		context_action_status.text = "Scanning affordances..."
-	if player_node != null:
-		player_node.set_action_lock(true, "context_actions")
-
 	context_actions_request_in_flight = true
-	await _fetch_context_actions_async(player_name, player_node.position, context_last_click_world)
+
+	var dist = tile_manhattan_distance_from_world(player_node.position, context_last_click_world)
+	# Observe/inspect is available within 2 tiles; all other actions require adjacency (≤1).
+	# Beyond 2 tiles show a read-only summary only.
+	var in_action_range = dist <= 2
+
+	if not in_action_range:
+		# Out of reach — show a read-only summary instead of an action menu.
+		await _show_object_summary_async(context_last_click_world)
+	else:
+		var focus_tile = world_to_tile(context_last_click_world)
+		if context_action_panel != null:
+			context_action_panel.visible = true
+		if context_action_title != null:
+			context_action_title.text = "Actions @ tile (%d, %d)" % [focus_tile.x, focus_tile.y]
+		if context_action_status != null:
+			context_action_status.text = "Scanning affordances..."
+		player_node.set_action_lock(true, "context_actions")
+		await _fetch_context_actions_async(player_name, player_node.position, context_last_click_world)
 
 func close_context_action_panel() -> void:
 	if context_action_panel != null:
@@ -1118,6 +1648,289 @@ func close_context_action_panel() -> void:
 	context_has_click_focus = false
 	if player_node != null and not dialogue_request_in_flight:
 		player_node.set_action_lock(false)
+
+# ── Object summary (shown when right-clicking out of interaction range) ──────
+
+func _show_object_summary_async(focus_world: Vector2) -> void:
+	"""Display a read-only description of whatever is at the clicked tile."""
+	var targets = _collect_targets_for_tile(focus_world)
+	_clear_context_action_buttons()
+
+	# Filter out walls and invisible anchors — nothing interesting to describe.
+	var describable: Array = []
+	for t in targets:
+		var props = t.get("properties", {})
+		if props is Dictionary and not bool(props.get("walkable", true)) and not bool(props.get("interactive", true)):
+			continue  # pure wall, skip
+		var ttype = str(t.get("type", ""))
+		if ttype == "wall" or ttype == "idle_zone":
+			continue
+		describable.append(t)
+
+	if describable.is_empty():
+		# Nothing here worth describing — silently cancel.
+		context_actions_request_in_flight = false
+		return
+
+	if context_action_panel != null:
+		context_action_panel.visible = true
+
+	# Use the first object's name as the panel title; list all if multiple.
+	var names = describable.map(func(t): return str(t.get("name", "Object")))
+	if context_action_title != null:
+		context_action_title.text = " / ".join(names) if names.size() <= 2 else names[0] + " …"
+
+	# Build summary lines for each describable target.
+	var lines: Array = []
+	for target in describable:
+		var summary = _build_target_summary(target)
+		if summary != "":
+			lines.append(summary)
+
+	if context_action_status != null:
+		context_action_status.text = "\n\n".join(lines) if not lines.is_empty() else "Nothing notable."
+
+	context_actions_request_in_flight = false
+	# Note: player action lock is NOT set for summary mode — reading is free.
+
+func _build_target_summary(target: Dictionary) -> String:
+	"""Return a brief natural-language description of a target (object or entity)."""
+	var kind = str(target.get("kind", ""))
+
+	if kind == "entity":
+		var name = str(target.get("name", "Someone"))
+		var state = agent_positions.get(name, {})
+		var activity = str(state.get("action", "")).strip_edges()
+		if activity.is_empty() or activity.to_lower().contains("agentic") or activity.to_lower() == "idle":
+			activity = "going about their business"
+		return name + " — " + activity + "."
+
+	if kind == "object":
+		var obj_type = str(target.get("type", "fixture"))
+		var name = str(target.get("name", "Object"))
+		var props = target.get("properties", {})
+		if not (props is Dictionary):
+			props = {}
+		var base = _get_object_base_description(obj_type, name, props)
+		var relational = _get_relational_context_for(str(target.get("id", "")), target)
+		if relational != "":
+			base = base.trim_suffix(".") + relational
+		return base
+
+	return ""
+
+func _get_object_base_description(obj_type: String, name: String, props: Dictionary) -> String:
+	"""Return a one-sentence description of an object based on its type and properties."""
+	var lower = name.to_lower()
+	match obj_type:
+		"fixture":
+			if bool(props.get("sitAround", false)):
+				return "A " + lower + " with seats arranged around it."
+			if bool(props.get("landmark", false)):
+				return "The " + lower + ", a local landmark."
+			if bool(props.get("performable", false)):
+				return "The " + lower + " — a raised platform for performances."
+			return "A " + lower + ", fixed in place."
+		"decor":
+			if bool(props.get("writable", false)) or bool(props.get("noteBoard", false)):
+				return "The " + lower + " — writings and notices cover its surface."
+			if bool(props.get("stealable", false)):
+				return "The " + lower + " catches your eye; small enough to pocket."
+			return "The " + lower + "."
+		"work_spot":
+			var activities: Array = props.get("activity", [])
+			if activities is Array and not activities.is_empty():
+				return "The " + lower + " — a workstation. Activities: " + ", ".join(activities) + "."
+			return "The " + lower + " — a place of work."
+		"entrance_anchor":
+			return "A doorway."
+		_:
+			return "A " + lower + "."
+
+func _get_relational_context_for(skip_id: String, target: Dictionary) -> String:
+	"""Check if other objects share this tile and return a relational phrase."""
+	var tx = float(target.get("x", 0.0))
+	var ty = float(target.get("y", 0.0))
+	var target_tile = world_to_tile(snap_to_tile(Vector2(tx, ty)))
+
+	var conames: Array = []
+	for obj in world_objects:
+		if not (obj is Dictionary):
+			continue
+		var oid = str(obj.get("id", ""))
+		if oid == skip_id or oid == "":
+			continue
+		var otype = str(obj.get("type", ""))
+		if otype == "wall" or otype == "entrance_anchor" or otype == "idle_zone":
+			continue
+		var opos = snap_to_tile(Vector2(float(obj.get("x", 0.0)), float(obj.get("y", 0.0))))
+		if world_to_tile(opos) == target_tile:
+			conames.append(str(obj.get("name", "something")).to_lower())
+
+	if conames.is_empty():
+		return ""
+	if conames.size() == 1:
+		return " A " + conames[0] + " rests nearby."
+	return " Alongside it: " + ", ".join(conames) + "."
+
+func _show_examine_panel_for_object(obj_id: String, obj_name: String, obj_row: Dictionary) -> void:
+	"""Show a detailed examine panel for a world object (inspect/observe action)."""
+	_clear_context_action_buttons()
+	if context_action_panel != null:
+		context_action_panel.visible = true
+	if context_action_title != null:
+		context_action_title.text = obj_name
+
+	var text = _generate_object_examine_text(obj_id, obj_name, obj_row)
+	if context_action_status != null:
+		context_action_status.text = text
+
+func _show_examine_panel_for_entity(entity_name: String) -> void:
+	"""Show a detailed examine panel for an agent or player."""
+	_clear_context_action_buttons()
+	if context_action_panel != null:
+		context_action_panel.visible = true
+	if context_action_title != null:
+		context_action_title.text = entity_name
+
+	var text = _generate_entity_examine_text(entity_name)
+	if context_action_status != null:
+		context_action_status.text = text
+
+func _generate_object_examine_text(obj_id: String, obj_name: String, obj_row: Dictionary) -> String:
+	var props = obj_row.get("properties", {})
+	if not (props is Dictionary):
+		props = {}
+	var server_state = obj_row.get("state", {})
+	if server_state is Dictionary and server_state.has("isOpen"):
+		props["doorOpen"] = bool(server_state.get("isOpen", true))
+
+	var obj_type = str(obj_row.get("type", "fixture"))
+	var lines: Array = []
+
+	# Physical description
+	var phys = _get_object_physical_description(obj_type, obj_name, props)
+	if phys != "":
+		lines.append(phys)
+
+	# State description (open/closed/locked/occupied)
+	var state_desc = _get_object_state_description(props, server_state if server_state is Dictionary else {})
+	if state_desc != "":
+		lines.append(state_desc)
+
+	# Activities
+	var activities: Array = props.get("activity", [])
+	if activities is Array and not activities.is_empty():
+		lines.append("Activities: " + ", ".join(activities) + ".")
+
+	# Nearby objects on same tile
+	var relational = _get_relational_context_for(obj_id, obj_row)
+	if relational != "":
+		lines.append(relational.strip_edges())
+
+	return "\n".join(lines) if not lines.is_empty() else "Nothing notable."
+
+func _generate_entity_examine_text(entity_name: String) -> String:
+	var state = agent_positions.get(entity_name, {})
+	var lines: Array = []
+
+	var location = str(state.get("location", "")).strip_edges()
+	if location != "" and location.to_lower() != "null":
+		lines.append("Location: " + location + ".")
+
+	var activity = str(state.get("action", "")).strip_edges()
+	if activity != "" and not activity.to_lower().contains("agentic") and activity.to_lower() != "idle":
+		lines.append(activity + ".")
+	else:
+		lines.append("Going about their business.")
+
+	return "\n".join(lines) if not lines.is_empty() else entity_name + "."
+
+func _get_object_physical_description(obj_type: String, name: String, props: Dictionary) -> String:
+	var lower = name.to_lower()
+
+	# If the object has an explicit free-text description, use it directly.
+	var explicit_desc = str(props.get("description", "")).strip_edges()
+	if explicit_desc != "" and explicit_desc.to_lower() != "null":
+		return explicit_desc
+
+	var door_like = bool(props.get("can_open_close", false)) \
+		or _contains_tag(props, "door") \
+		or _contains_tag(props, "entrance")
+
+	# Build descriptor words from known property keys.
+	var descriptors: Array = []
+
+	var color = str(props.get("color", "")).strip_edges()
+	if color != "" and color.to_lower() != "null":
+		descriptors.append(color)
+
+	var material = str(props.get("material", "")).strip_edges()
+	if material != "" and material.to_lower() != "null":
+		descriptors.append(material)
+
+	var condition = str(props.get("condition", "")).strip_edges()
+	if condition != "" and condition.to_lower() != "null":
+		descriptors.append(condition)
+
+	var size = str(props.get("size", "")).strip_edges()
+	if size != "" and size.to_lower() != "null":
+		descriptors.append(size)
+
+	var qualifier = (" ".join(descriptors) + " ") if not descriptors.is_empty() else ""
+
+	# Type-specific base sentence, enriched with qualifier.
+	if door_like:
+		return ("A " + qualifier + "door." if qualifier != "" else "A door.").strip_edges()
+
+	match obj_type:
+		"fixture":
+			if bool(props.get("sitAround", false)):
+				var comfort = str(props.get("comfort", "")).strip_edges()
+				var comfort_note = (" It looks " + comfort + ".") if comfort != "" and comfort.to_lower() != "null" else ""
+				return "A " + qualifier + lower + " with seats arranged around it." + comfort_note
+			if bool(props.get("landmark", false)):
+				return "The " + qualifier + lower + ", a local landmark."
+			if bool(props.get("performable", false)):
+				return "The " + qualifier + lower + " — a raised platform for performances."
+			return ("A " + qualifier + lower + ".").strip_edges()
+		"decor":
+			if bool(props.get("writable", false)) or bool(props.get("noteBoard", false)):
+				return "The " + qualifier + lower + " — writings and notices cover its surface."
+			if bool(props.get("stealable", false)):
+				return "The " + qualifier + lower + " — small enough to pocket."
+			return ("The " + qualifier + lower + ".").strip_edges()
+		"work_spot":
+			return ("The " + qualifier + lower + " — a workstation.").strip_edges()
+		"entrance_anchor":
+			return "A doorway."
+		_:
+			return ("A " + qualifier + lower + ".").strip_edges()
+
+func _get_object_state_description(props: Dictionary, server_state: Dictionary) -> String:
+	var parts: Array = []
+
+	var is_transition = bool(props.get("transition_point", false)) \
+		or bool(props.get("can_open_close", false)) \
+		or _contains_tag(props, "door") \
+		or _contains_tag(props, "entrance")
+
+	if is_transition:
+		var locked = bool(props.get("locked", false))
+		# Fall back to legacy doorOpen if locked not set
+		if not props.has("locked"):
+			locked = not bool(props.get("doorOpen", true))
+		parts.append("It is " + ("locked" if locked else "unlocked") + ".")
+
+	if bool(props.get("locked", false)) or bool(server_state.get("isLocked", false)):
+		if not is_transition:  # avoid double-printing for doors
+			parts.append("It appears to be locked.")
+
+	var occupant = str(server_state.get("occupiedBy", "")).strip_edges()
+	if occupant != "" and occupant.to_lower() != "null":
+		parts.append(occupant + " is here.")
+
+	return " ".join(parts)
 
 func _clear_context_action_buttons() -> void:
 	if context_action_list == null:
@@ -1140,21 +1953,52 @@ func _fetch_context_actions_async(player_id: String, player_position: Vector2, f
 	var grouped_actions = _build_actions_grouped_by_target(targets)
 	context_actions_cache = grouped_actions
 	_render_grouped_context_actions(grouped_actions)
+
+	# Always show a description of the focused target below the action buttons.
+	if focus_world != null and context_action_status != null:
+		var desc_lines: Array = []
+		for t in targets:
+			if not (t is Dictionary):
+				continue
+			var ttype = str(t.get("type", ""))
+			if ttype == "wall" or ttype == "idle_zone":
+				continue
+			var summary = _build_target_summary(t)
+			if summary != "":
+				desc_lines.append(summary)
+		context_action_status.text = "\n".join(desc_lines) if not desc_lines.is_empty() else ""
+	elif context_action_status != null:
+		context_action_status.text = ""
+
 	context_actions_request_in_flight = false
+
+func _is_object_held(row: Dictionary) -> bool:
+	"""True when this world object is currently in someone's inventory."""
+	var props = row.get("properties", {})
+	if not (props is Dictionary):
+		return false
+	var held_by = str(props.get("heldBy", "")).strip_edges()
+	return held_by != "" and held_by.to_lower() != "null"
 
 func _collect_targets_for_tile(focus_world: Vector2) -> Array:
 	var targets: Array = []
 	var focus_tile = world_to_tile(focus_world)
+	var player_pos = player_node.position if player_node != null else focus_world
 
 	for row in world_objects:
 		if not (row is Dictionary):
 			continue
+		if _is_object_held(row):
+			continue
 		var snapped_obj = snap_to_tile(Vector2(float(row.get("x", 0.0)), float(row.get("y", 0.0))))
 		if world_to_tile(snapped_obj) != focus_tile:
+			continue
+		if not has_line_of_sight(player_pos, snapped_obj):
 			continue
 		targets.append({
 			"kind": "object",
 			"id": str(row.get("id", "")),
+			"type": str(row.get("type", "fixture")),
 			"name": str(row.get("name", row.get("id", "object"))),
 			"x": snapped_obj.x,
 			"y": snapped_obj.y,
@@ -1167,6 +2011,8 @@ func _collect_targets_for_tile(focus_world: Vector2) -> Array:
 		if pos == Vector2.ZERO:
 			continue
 		if world_to_tile(pos) != focus_tile:
+			continue
+		if not has_line_of_sight(player_pos, pos):
 			continue
 		targets.append({
 			"kind": "entity",
@@ -1185,12 +2031,17 @@ func _collect_targets_near(center: Vector2, radius: float) -> Array:
 	for row in world_objects:
 		if not (row is Dictionary):
 			continue
+		if _is_object_held(row):
+			continue
 		var snapped_obj = snap_to_tile(Vector2(float(row.get("x", 0.0)), float(row.get("y", 0.0))))
 		if tile_manhattan_distance_from_world(center, snapped_obj) > radius_tiles:
+			continue
+		if not has_line_of_sight(center, snapped_obj):
 			continue
 		targets.append({
 			"kind": "object",
 			"id": str(row.get("id", "")),
+			"type": str(row.get("type", "fixture")),
 			"name": str(row.get("name", row.get("id", "object"))),
 			"x": snapped_obj.x,
 			"y": snapped_obj.y,
@@ -1203,6 +2054,8 @@ func _collect_targets_near(center: Vector2, radius: float) -> Array:
 		if pos == Vector2.ZERO:
 			continue
 		if tile_manhattan_distance_from_world(center, pos) > radius_tiles:
+			continue
+		if not has_line_of_sight(center, pos):
 			continue
 		targets.append({
 			"kind": "entity",
@@ -1275,38 +2128,75 @@ func _derive_target_properties(target_row: Dictionary) -> Dictionary:
 			var merged = props.duplicate(true)
 			if not merged.has("interactive"):
 				merged["interactive"] = true
+			# pocket_size implies the object can be carried (backpack-carryable)
+			if _is_truthy(merged.get("pocket_size", false)) and not merged.has("carriable"):
+				merged["carriable"] = true
+
+			# Ensure transition_point is set for door-like legacy objects
 			if _contains_tag(merged, "entrance") or _contains_tag(merged, "door"):
-				merged["can_open_close"] = true
-			if not merged.has("can_open_close") and merged.has("doorOpen"):
-				merged["can_open_close"] = true
+				merged["transition_point"] = true
+			if merged.has("doorOpen") and not merged.has("transition_point"):
+				merged["transition_point"] = true
+			# Do NOT add can_open_close for transition_point objects — they use lock/unlock
+
+			# Climbable: explicit property takes priority; fallback-derive from shape
+			var height = str(merged.get("height", "")).to_lower()
+			var has_flat = _is_truthy(merged.get("flat_surface", false))
+			var passable = _is_truthy(merged.get("passable", true))
+			var climbable_heights = ["low", "medium", "counter"]
+			if not merged.has("climbable"):
+				if not passable and has_flat and climbable_heights.has(height):
+					merged["climbable"] = true
+
+			# Sittable: explicit or derive from shape
+			if not merged.has("sittable"):
+				if _is_truthy(merged.get("sitAround", false)) or (height == "low" and has_flat):
+					merged["sittable"] = true
+
 			return merged
 		return {"interactive": true}
 
-	# Entities: expose capability-style properties instead of type-specific actions.
-	return {
-		"interactive": true,
-		"can_talk": true,
-		"can_observe": true,
-		"can_attack": true
-	}
+	# Entities
+	# Entities: richer physical properties so target-based and subject-based rules work
+	var entity_props = target_row.get("properties", {})
+	var ep: Dictionary = (entity_props.duplicate(true) if entity_props is Dictionary else {})
+	if not ep.has("interactive"):       ep["interactive"]       = true
+	if not ep.has("can_talk"):          ep["can_talk"]          = true
+	if not ep.has("can_observe"):       ep["can_observe"]       = true
+	if not ep.has("can_attack"):        ep["can_attack"]        = true
+	if not ep.has("is_entity"):         ep["is_entity"]         = true
+	# Entities (agents/players) can't be written on with normal tools
+	if not ep.has("hard_to_write_on"):  ep["hard_to_write_on"]  = true
+	return ep
+
+## Safe truthiness check that handles bool, int, float, String, Array, Dict.
+## Replaces bare bool() calls on values that may come from JSON (strings, etc.)
+func _is_truthy(v) -> bool:
+	if v == null: return false
+	if v is bool: return v
+	if v is int:  return v != 0
+	if v is float: return v != 0.0
+	if v is String: return v != "" and v.to_lower() != "false" and v.to_lower() != "null" and v != "0"
+	if v is Array: return not (v as Array).is_empty()
+	if v is Dictionary: return not (v as Dictionary).is_empty()
+	return true
 
 func _derive_actions_from_properties(kind: String, target_id: String, target_name: String, properties: Dictionary, distance: float) -> Array:
 	var actions: Array = []
-	if not bool(properties.get("interactive", true)):
+	if not _is_truthy(properties.get("interactive", true)):
 		return actions
 
+	# ── Target-property rules ────────────────────────────────────────────────
 	var candidate_rules: Array = []
 	for property_key in property_action_rules.keys():
-		if bool(properties.get(property_key, false)):
+		if _is_truthy(properties.get(property_key, false)):
 			var mapped = property_action_rules[property_key]
 			if mapped is Array:
 				candidate_rules.append_array(mapped)
 
-	# Always allow inspect on interactive targets.
-	if candidate_rules.is_empty() or not bool(properties.get("interactive", true)):
-		candidate_rules.append_array(property_action_rules.get("interactive", []))
-
-	if bool(properties.get("interactive", true)):
+	# Always allow inspect on any interactive target.
+	if _is_truthy(properties.get("interactive", true)):
+		# Append inspect only if not already added via the loop above
 		candidate_rules.append_array(property_action_rules.get("interactive", []))
 
 	var seen_keys: Dictionary = {}
@@ -1317,47 +2207,114 @@ func _derive_actions_from_properties(kind: String, target_id: String, target_nam
 		if action_key == "" or seen_keys.has(action_key):
 			continue
 
-		if action_key == "close" and not bool(properties.get("doorOpen", true)):
-			continue
-		if action_key == "open" and bool(properties.get("doorOpen", true)):
-			continue
-		if action_key == "carry" and (bool(properties.get("rooted", false)) or bool(properties.get("uncarriable", false))):
-			continue
-		if action_key == "carry" and carried_object_id != "":
+		# Per-rule maxDistance; defaults: observe/inspect=2, speak=3, everything else=1.
+		var max_dist: float = float(rule.get("maxDistance", -1))
+		if max_dist < 0:
+			if action_key == "observe" or action_key == "inspect":
+				max_dist = 2.0
+			elif str(rule.get("actionType", "")) == "speak":
+				max_dist = 3.0
+			else:
+				max_dist = 1.0
+		if distance > max_dist:
 			continue
 
-		if bool(rule.get("requiresInventory", false)) and not _player_has_any_inventory():
+		# Lock/unlock: only show the action that matches the current locked state
+		var is_locked = _is_truthy(properties.get("locked", false))
+		if action_key == "unlock" and not is_locked:
+			continue
+		if action_key == "lock" and is_locked:
+			continue
+
+		# open/close legacy: suppress for transition_point objects (they use lock/unlock)
+		if (action_key == "open" or action_key == "close") and _is_truthy(properties.get("transition_point", false)):
+			continue
+		if action_key == "close" and not _is_truthy(properties.get("doorOpen", true)):
+			continue
+		if action_key == "open" and _is_truthy(properties.get("doorOpen", true)):
+			continue
+		if action_key == "carry" and (_is_truthy(properties.get("rooted", false)) or _is_truthy(properties.get("uncarriable", false))):
+			continue
+		if action_key == "carry" and str(properties.get("heldBy", "")) == player_name:
+			continue
+
+		if _is_truthy(rule.get("requiresInventory", false)) and not _player_has_any_inventory():
 			continue
 		if rule.has("requiresAny") and rule.get("requiresAny") is Array:
 			if not _player_has_any_inventory_tag(rule.get("requiresAny", [])):
 				continue
-		if action_key == "write" and bool(properties.get("hard_to_write_on", false)):
+		if action_key == "write" and _is_truthy(properties.get("hard_to_write_on", false)):
 			if not _player_has_any_inventory_tag(["paint", "marker_paint"]):
 				continue
 
 		seen_keys[action_key] = true
-		var action_type = str(rule.get("actionType", "interact"))
-		var verb = str(rule.get("description", "Interacting with"))
-		var label = str(rule.get("label", action_key.capitalize()))
-		var target_agent = "object:" + target_id if kind == "object" else target_id
+		_append_action(actions, action_key, rule.get("actionType", "interact"),
+			rule.get("description", "Interacting with"), rule.get("label", action_key.capitalize()),
+			kind, target_id, target_name, distance)
 
-		var payload = {
+	# ── Subject-property rules (actor-inherent physical actions) ─────────────
+	for subject_prop in subject_property_rules.keys():
+		if not _is_truthy(player_inherent_properties.get(subject_prop, false)):
+			continue
+		for rule in subject_property_rules[subject_prop]:
+			if not (rule is Dictionary): continue
+			var action_key = str(rule.get("actionKey", "")).strip_edges()
+			if action_key == "" or seen_keys.has(action_key): continue
+			var target_kinds = rule.get("targetKinds", [])
+			if (target_kinds is Array) and not target_kinds.is_empty() and not target_kinds.has(kind):
+				continue
+			if distance > 1: continue  # physical actions require adjacency
+			seen_keys[action_key] = true
+			_append_action(actions, action_key, rule.get("actionType", "attack"),
+				rule.get("description", "Acting on"), rule.get("label", action_key.capitalize()),
+				kind, target_id, target_name, distance)
+
+	# ── Tool-action rules (inventory-tag-based actions) ───────────────────────
+	# The dict key is the exact tag to match in carried items' properties.tags.
+	# Object definitions are the authority — no synonym guessing here.
+	for tool_tag in tool_action_rules.keys():
+		if not _player_has_any_inventory_tag([tool_tag]): continue
+		for rule in tool_action_rules[tool_tag]:
+			if not (rule is Dictionary): continue
+			var action_key = str(rule.get("actionKey", "")).strip_edges()
+			if action_key == "" or seen_keys.has(action_key): continue
+			var target_kinds = rule.get("targetKinds", [])
+			if (target_kinds is Array) and not target_kinds.is_empty() and not target_kinds.has(kind):
+				continue
+			# If the rule requires a specific target property, check it
+			var req_prop = str(rule.get("targetRequires", ""))
+			if req_prop != "" and not _is_truthy(properties.get(req_prop, false)):
+				continue
+			# Tool actions on objects need target to be interactive; entities always eligible
+			if kind == "object" and not _is_truthy(properties.get("interactive", true)):
+				continue
+			if distance > 1: continue
+			seen_keys[action_key] = true
+			_append_action(actions, action_key, rule.get("actionType", "interact"),
+				rule.get("description", "Using on"), rule.get("label", action_key.capitalize()),
+				kind, target_id, target_name, distance)
+
+	return actions
+
+## Helper: build and append one action dict to the list.
+func _append_action(actions: Array, action_key: String, action_type, description, label,
+		kind: String, target_id: String, target_name: String, distance: float) -> void:
+	var verb = str(description)
+	var target_agent = ("object:" + target_id) if kind == "object" else target_id
+	actions.append({
+		"label": str(label),
+		"actionType": str(action_type),
+		"targetKind": kind,
+		"targetId": target_id,
+		"targetName": target_name,
+		"distance": distance,
+		"hint": "%s %s" % [verb, target_name],
+		"payload": {
 			"targetAgent": target_agent,
 			"actionDescription": "%s %s" % [verb, target_name],
 			"flair": "action:%s" % action_key
 		}
-		actions.append({
-			"label": label,
-			"actionType": action_type,
-			"targetKind": kind,
-			"targetId": target_id,
-			"targetName": target_name,
-			"distance": distance,
-			"hint": "%s %s" % [verb, target_name],
-			"payload": payload
-		})
-
-	return actions
+	})
 
 func _player_has_any_inventory() -> bool:
 	if player_node == null:
@@ -1367,7 +2324,7 @@ func _player_has_any_inventory() -> bool:
 	var inv = player_node.inventory
 	return inv is Array and not inv.is_empty()
 
-func _player_has_any_inventory_tag(tags: Array) -> bool:
+func _player_has_any_inventory_tag(required_tags: Array) -> bool:
 	if player_node == null:
 		return false
 	if not ("inventory" in player_node):
@@ -1376,10 +2333,24 @@ func _player_has_any_inventory_tag(tags: Array) -> bool:
 	if not (inv is Array):
 		return false
 	for item in inv:
-		var item_text = str(item).to_lower()
-		for tag in tags:
-			if item_text.contains(str(tag).to_lower()):
-				return true
+		if item is Dictionary:
+			# Rich item object — check properties.tags array and item name
+			var props = item.get("properties", {})
+			var item_tags: Array = (props.get("tags", []) if props is Dictionary else [])
+			var item_name = str(item.get("name", "")).to_lower()
+			for req in required_tags:
+				var req_lower = str(req).to_lower()
+				if item_name.contains(req_lower):
+					return true
+				for t in item_tags:
+					if str(t).to_lower() == req_lower:
+						return true
+		else:
+			# Plain string ID fallback
+			var item_text = str(item).to_lower()
+			for req in required_tags:
+				if item_text.contains(str(req).to_lower()):
+					return true
 	return false
 
 func _contains_tag(properties: Dictionary, tag_name: String) -> bool:
@@ -1422,6 +2393,8 @@ func _render_grouped_context_actions(groups: Array) -> void:
 			button.pressed.connect(_on_context_action_selected.bind(action))
 			context_action_list.add_child(button)
 
+	_fit_context_panel()
+
 func _render_context_actions(actions: Array) -> void:
 	_clear_context_action_buttons()
 	if context_action_status != null:
@@ -1446,6 +2419,24 @@ func _render_context_actions(actions: Array) -> void:
 		button.pressed.connect(_on_context_action_selected.bind(action))
 		context_action_list.add_child(button)
 
+	_fit_context_panel()
+
+func _fit_context_panel() -> void:
+	"""Resize the ContextActionPanel to exactly contain its content (up to 540px tall)."""
+	if context_action_panel == null: return
+	# Defer one frame so VBoxContainer has calculated its children's minimum sizes
+	await get_tree().process_frame
+	if not is_instance_valid(context_action_panel): return
+	var vbox = context_action_panel.get_node_or_null("ActionVBox")
+	if vbox == null: return
+	var min_size = vbox.get_combined_minimum_size()
+	var panel_w = 375.0
+	var panel_h = clamp(min_size.y + 22.0, 110.0, 540.0)
+	context_action_panel.set_offset(SIDE_RIGHT,  context_action_panel.get_offset(SIDE_LEFT) + panel_w)
+	context_action_panel.set_offset(SIDE_BOTTOM, context_action_panel.get_offset(SIDE_TOP)  + panel_h)
+	vbox.set_offset(SIDE_RIGHT,  panel_w - 10.0)
+	vbox.set_offset(SIDE_BOTTOM, panel_h - 10.0)
+
 func _on_context_action_selected(action: Dictionary) -> void:
 	if player_node == null:
 		return
@@ -1465,8 +2456,92 @@ func _on_context_action_selected(action: Dictionary) -> void:
 	object_interaction_in_last_turn = false
 
 	if action_type == "speak" and not target_agent.begins_with("object:"):
-		open_dialogue_panel(target_agent)
+		var action_key_pre = flair.trim_prefix("action:")
+		if action_key_pre == "shout":
+			# Broadcast: open dialogue with empty target so server picks nearest listener
+			open_dialogue_panel("", false)
+			close_context_action_panel()
+		else:
+			open_dialogue_panel(target_agent)
+			close_context_action_panel()
+		return
+
+	var action_key = flair.trim_prefix("action:")
+	var target_name = str(action.get("targetName", target_id))
+
+	# Inspect / observe → local examine panel, no server round-trip.
+	if action_key == "inspect" or action_key == "observe":
 		close_context_action_panel()
+		var target_obj = _get_world_object_by_id(target_id) if target_kind == "object" else null
+		if target_obj != null:
+			_show_examine_panel_for_object(target_id, str(action.get("targetName", target_id)), target_obj)
+		elif target_kind == "entity":
+			_show_examine_panel_for_entity(target_id)
+		return
+
+	# Climb / sit → move player to object tile (climb) or enqueue activity (sit).
+	if action_key == "climb" or action_key == "sit":
+		close_context_action_panel()
+		var target_obj = _get_world_object_by_id(target_id) if target_kind == "object" else null
+		if target_obj != null:
+			var obj_world = snap_to_tile(Vector2(float(target_obj.get("x", player_node.position.x)), float(target_obj.get("y", player_node.position.y))))
+			var obj_location = str(target_obj.get("location", player_node.current_location))
+			var desc = ("Climbing onto " if action_key == "climb" else "Sitting at ") + target_name
+			if action_key == "climb":
+				# Optimistically move player to the object tile so the client stays in sync
+				if player_node != null:
+					player_node.position = obj_world
+					if "current_location" in player_node:
+						player_node.current_location = obj_location
+					_rebuild_blocked_tiles_cache()
+				# Move to the object's tile with climb flair — server allows it for climbable objects
+				object_interaction_in_last_turn = true
+				enqueue_player_action(player_name, "move", "", obj_location,
+					obj_world.x, obj_world.y, desc, "", 0.3, "", "action:climb")
+			else:
+				# Sit: stay in place, just update activity
+				enqueue_player_action(player_name, "interact", "object:" + target_id,
+					obj_location, player_node.position.x, player_node.position.y,
+					desc, "", 0.1, "", "action:sit")
+		return
+
+	# Write → show text-input dialog; action is sent when the player confirms.
+	if action_key == "write":
+		close_context_action_panel()
+		var target_obj = _get_world_object_by_id(target_id) if target_kind == "object" else null
+		var obj_location = str(target_obj.get("location", player_node.current_location)) if target_obj != null else player_node.current_location
+		_pending_write_action = {
+			"targetAgent": "object:" + target_id if target_kind == "object" else target_id,
+			"targetName": target_name,
+			"location": obj_location,
+			"playerX": player_node.position.x if player_node != null else 0.0,
+			"playerY": player_node.position.y if player_node != null else 0.0
+		}
+		if write_panel != null:
+			if write_panel_label != null:
+				write_panel_label.text = "Write on " + target_name + ":"
+			if write_panel_input != null:
+				write_panel_input.text = ""
+			write_panel.visible = true
+			if write_panel_input != null:
+				write_panel_input.grab_focus()
+		return
+
+	# Read → show has_writing content locally, no server round-trip.
+	if action_key == "read":
+		close_context_action_panel()
+		var target_obj = _get_world_object_by_id(target_id) if target_kind == "object" else null
+		if target_obj != null:
+			var props = target_obj.get("properties", {})
+			var writing = str(props.get("has_writing", "")).strip_edges() if props is Dictionary else ""
+			var obj_name = str(action.get("targetName", target_id))
+			_clear_context_action_buttons()
+			if context_action_panel != null:
+				context_action_panel.visible = true
+			if context_action_title != null:
+				context_action_title.text = obj_name
+			if context_action_status != null:
+				context_action_status.text = writing if writing != "" and writing.to_lower() != "null" else "(nothing written)"
 		return
 
 	var target_world = Vector2.ZERO
@@ -1475,39 +2550,28 @@ func _on_context_action_selected(action: Dictionary) -> void:
 		var target_obj = _get_world_object_by_id(target_id)
 		if target_obj != null:
 			var object_world = snap_to_tile(Vector2(float(target_obj.get("x", player_node.position.x)), float(target_obj.get("y", player_node.position.y))))
-			target_world = _resolve_interaction_stand_tile(object_world)
+			target_world = _resolve_interaction_stand_tile(object_world, target_obj)
 			target_location = str(target_obj.get("location", target_location))
 	elif target_kind == "entity":
 		target_world = _get_live_entity_position(target_id)
 		target_location = get_location_name_for_position(target_world, target_location)
 
-	if target_world != Vector2.ZERO and tile_manhattan_distance_from_world(player_node.position, target_world) > 1:
-		pending_context_followup_action = {
-			"actionType": action_type,
-			"targetAgent": target_agent,
-			"actionDescription": action_description,
-			"speakText": speak_text,
-			"intensity": intensity,
-			"item": item,
-			"flair": flair,
-			"targetKind": target_kind,
-			"targetId": target_id,
-			"targetName": str(action.get("targetName", target_id)),
-			"targetLocation": target_location,
-			"targetX": target_world.x,
-			"targetY": target_world.y
-		}
-		enqueue_player_action(
-			player_name,
-			"move",
-			"",
-			target_location,
-			target_world.x,
-			target_world.y,
-			"Moving toward " + str(action.get("targetName", target_id))
-		)
+	# Sanity guard: the context menu is only shown for adjacent/same-tile targets,
+	# so this path should only execute when the player is already in range.
+	# If somehow they aren't (e.g. they moved between right-click and selection),
+	# reject silently rather than auto-pathing.
+	var is_reachable = true
+	if target_kind == "object":
+		var tobj = _get_world_object_by_id(target_id)
+		if tobj != null:
+			var ow = snap_to_tile(Vector2(float(tobj.get("x", player_node.position.x)), float(tobj.get("y", player_node.position.y))))
+			is_reachable = _player_within_object_interaction(player_node.position, ow, tobj)
+	elif target_world != Vector2.ZERO:
+		is_reachable = tile_manhattan_distance_from_world(player_node.position, target_world) <= dialogue_interaction_tiles
+
+	if not is_reachable:
 		if context_action_status != null:
-			context_action_status.text = "Pathing toward target..."
+			context_action_status.text = "Too far — move adjacent first."
 		close_context_action_panel()
 		return
 
@@ -1526,9 +2590,19 @@ func _on_context_action_selected(action: Dictionary) -> void:
 	if context_action_status != null:
 		context_action_status.text = "Queued: " + str(action.get("label", action_type))
 	if flair.begins_with("action:"):
-		var action_key = flair.substr("action:".length())
 		if action_key == "carry" and target_kind == "object":
+			carry_action_in_last_turn = true
 			carried_object_id = target_id
+			# Optimistically mark as held so it vanishes from world immediately
+			var carry_obj = _get_world_object_by_id(target_id)
+			if carry_obj != null:
+				var carry_props = carry_obj.get("properties", {})
+				if not (carry_props is Dictionary):
+					carry_props = {}
+					carry_obj["properties"] = carry_props
+				carry_props["heldBy"] = player_name
+			_rebuild_blocked_tiles_cache()
+			_redraw_object_overlays()
 		elif action_key == "place_object":
 			carried_object_id = ""
 	close_context_action_panel()
@@ -1543,7 +2617,7 @@ func _execute_context_followup_payload(payload: Dictionary) -> void:
 	if target_kind == "object":
 		var object_row = _get_world_object_by_id(target_id)
 		if object_row != null:
-			_apply_local_door_effect(action_description, object_row)
+			_apply_local_passability_effect(action_description, str(payload.get("flair", "")), object_row)
 
 	enqueue_player_action(
 		player_name,
@@ -1572,50 +2646,190 @@ func _get_world_object_by_id(object_id: String):
 			return row
 	return null
 
-func _resolve_interaction_stand_tile(object_world: Vector2) -> Vector2:
-	"""Return a reachable stand tile for interacting with an object.
-	Prefers the closest cardinal adjacent tile; falls back to current player tile."""
+func _player_adjacent_to_object_tile(player_world: Vector2, object_world: Vector2) -> bool:
+	"""True when on or one tile away from the object (distance 0 = standing on it, 1 = adjacent)."""
+	var pt = world_to_tile(player_world)
+	var ot = world_to_tile(object_world)
+	return tile_manhattan_distance(pt, ot) <= 1
+
+
+func _player_within_object_interaction(player_world: Vector2, object_world: Vector2, object_row: Variant) -> bool:
+	# Path completion and stand resolution use strict adjacency so interactions (e.g. doors) face from a free neighbor tile.
+	return _player_adjacent_to_object_tile(player_world, object_world)
+
+
+func _resolve_interaction_stand_tile(object_world: Vector2, object_row: Variant = null) -> Vector2:
+	"""Pick a reachable walkable tile one Manhattan step from the object's tile (prefer ring 1; expand if needed)."""
 	if player_node == null:
 		return object_world
 
 	var object_tile = world_to_tile(object_world)
 	var player_tile = world_to_tile(player_node.position)
-	if tile_manhattan_distance(player_tile, object_tile) <= 1 and not is_coordinate_blocked(player_node.position):
+	if _player_adjacent_to_object_tile(player_node.position, object_world) and not is_coordinate_blocked(player_node.position):
 		return snap_to_tile(player_node.position)
 
+	var bounds = get_world_bounds()
 	var best_tile = player_tile
 	var best_score = INF
-	for dir in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
-		var candidate_tile = object_tile + dir
-		var candidate_world = tile_to_world(candidate_tile)
-		if is_coordinate_blocked(candidate_world):
-			continue
-		var bounds = get_world_bounds()
-		if candidate_world.x < bounds.get("minX", 0.0) or candidate_world.x > bounds.get("maxX", 1800.0):
-			continue
-		if candidate_world.y < bounds.get("minY", 0.0) or candidate_world.y > bounds.get("maxY", 1200.0):
-			continue
-		var score = tile_manhattan_distance(player_tile, candidate_tile)
-		if score < best_score:
-			best_score = score
-			best_tile = candidate_tile
+	var found = false
+	for ring in range(1, 8):
+		var ring_best = INF
+		var ring_tile = player_tile
+		var any_in_ring = false
+		for dx in range(-ring, ring + 1):
+			for dy in range(-ring, ring + 1):
+				if abs(dx) + abs(dy) != ring:
+					continue
+				var candidate_tile = object_tile + Vector2i(dx, dy)
+				var candidate_world = tile_to_world(candidate_tile)
+				if is_coordinate_blocked(candidate_world):
+					continue
+				if candidate_world.x < bounds.get("minX", 0.0) or candidate_world.x > bounds.get("maxX", 1800.0):
+					continue
+				if candidate_world.y < bounds.get("minY", 0.0) or candidate_world.y > bounds.get("maxY", 1200.0):
+					continue
+				var score = tile_manhattan_distance(player_tile, candidate_tile)
+				if score < ring_best:
+					ring_best = score
+					ring_tile = candidate_tile
+					any_in_ring = true
+		if any_in_ring:
+			best_tile = ring_tile
+			best_score = ring_best
+			found = true
+			break
 
+	if not found:
+		return snap_to_tile(player_node.position)
 	return tile_to_world(best_tile)
 
-func _apply_local_door_effect(action_description: String, object_row: Dictionary) -> void:
+func _apply_local_passability_effect(action_description: String, flair: String, object_row: Dictionary) -> void:
+	"""Apply lock/unlock (or legacy open/close) locally and persist to server."""
 	if object_row == null:
 		return
 	var lower = str(action_description).to_lower()
-	if not (lower.contains("open") or lower.contains("close")):
-		return
-	if lower.contains("close"):
-		object_row["properties"] = object_row.get("properties", {})
-		if object_row["properties"] is Dictionary:
-			object_row["properties"]["doorOpen"] = false
+	var flair_lower = str(flair).to_lower()
+	var patch: Dictionary = {}
+
+	if flair_lower.contains("action:unlock") or (lower.contains("unlock") and not lower.contains("lock")):
+		patch = {"locked": false, "passable": true, "doorOpen": true}
+	elif flair_lower.contains("action:lock") or lower.begins_with("lock") or lower.contains(" lock"):
+		patch = {"locked": true, "passable": false, "doorOpen": false}
+	elif lower.contains("close"):
+		patch = {"locked": true, "passable": false, "doorOpen": false}
 	elif lower.contains("open"):
-		object_row["properties"] = object_row.get("properties", {})
-		if object_row["properties"] is Dictionary:
-			object_row["properties"]["doorOpen"] = true
+		patch = {"locked": false, "passable": true, "doorOpen": true}
+	else:
+		return
+
+	var props = object_row.get("properties", {})
+	if not (props is Dictionary):
+		props = {}
+		object_row["properties"] = props
+	for k in patch:
+		props[k] = patch[k]
+	_rebuild_blocked_tiles_cache()
+	var obj_id = str(object_row.get("id", ""))
+	if obj_id != "":
+		_patch_object_properties_async(obj_id, patch)
+
+func _sync_player_inventory_async() -> void:
+	"""Re-fetch /player/{name} and push inventoryObjects into player_node.inventory."""
+	if player_node == null:
+		return
+	var http = HTTPRequest.new()
+	add_child(http)
+	var err = http.request("%s/player/%s" % [backend_url, player_name.uri_encode()])
+	if err != OK:
+		http.queue_free()
+		return
+	var response = await http.request_completed
+	http.queue_free()
+	if response[1] != 200:
+		return
+	var json = JSON.new()
+	if json.parse(response[3].get_string_from_utf8()) != OK:
+		return
+	var payload = json.data
+	if not (payload is Dictionary):
+		return
+	var inv_objects: Array = payload.get("inventoryObjects", [])
+	if not (inv_objects is Array):
+		inv_objects = []
+	if "inventory" in player_node:
+		if not inv_objects.is_empty():
+			player_node.inventory = inv_objects.duplicate()
+		else:
+			var inv_ids: Array = payload.get("inventory", [])
+			player_node.inventory = (inv_ids if inv_ids is Array else []).duplicate()
+	# If the inventory panel is currently open, re-render it with fresh data
+	if context_action_panel != null and context_action_panel.visible \
+			and context_action_title != null and context_action_title.text == "Inventory":
+		_clear_context_action_buttons()
+		if context_action_status != null:
+			context_action_status.text = "Empty" if inv_objects.is_empty() else "%d item(s)" % inv_objects.size()
+		if context_action_list != null:
+			if inv_objects.is_empty():
+				var empty_label = Label.new()
+				empty_label.text = "(nothing carried)"
+				empty_label.add_theme_font_size_override("font_size", 12)
+				empty_label.modulate = Color(0.7, 0.7, 0.7, 0.9)
+				context_action_list.add_child(empty_label)
+			else:
+				for item_obj in inv_objects:
+					if not (item_obj is Dictionary):
+						continue
+					var item_id = str(item_obj.get("id", ""))
+					var item_name = str(item_obj.get("name", item_id))
+					var item_props = item_obj.get("properties", {})
+					var item_desc = ""
+					if item_props is Dictionary:
+						item_desc = str(item_props.get("description", "")).strip_edges()
+					var row = HBoxContainer.new()
+					row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+					var name_label = Label.new()
+					name_label.text = item_name
+					name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+					name_label.add_theme_font_size_override("font_size", 12)
+					name_label.modulate = Color(0.95, 0.95, 0.78, 1.0)
+					if item_desc != "" and item_desc.to_lower() != "null":
+						name_label.tooltip_text = item_desc
+					row.add_child(name_label)
+					var drop_btn = Button.new()
+					drop_btn.text = "Drop"
+					drop_btn.add_theme_font_size_override("font_size", 11)
+					drop_btn.pressed.connect(_on_inventory_drop_pressed.bind(item_id, item_name))
+					row.add_child(drop_btn)
+					context_action_list.add_child(row)
+
+func _patch_object_properties_async(obj_id: String, patch: Dictionary) -> void:
+	"""PATCH /objects/{id}/properties — merge-update a subset of an object's properties."""
+	var http = HTTPRequest.new()
+	add_child(http)
+	var err = http.request(
+		backend_url + "/objects/" + obj_id.uri_encode() + "/properties",
+		["Content-Type: application/json"],
+		HTTPClient.METHOD_PATCH,
+		JSON.stringify(patch)
+	)
+	if err != OK:
+		http.queue_free()
+		push_error("[OBJECTS] Failed to PATCH properties for: " + obj_id)
+		return
+	var response = await http.request_completed
+	http.queue_free()
+	if response[1] != 200:
+		push_error("[OBJECTS] PATCH /objects/%s/properties failed: %d" % [obj_id, response[1]])
+		return
+	# Update local world_objects entry so future describe calls see the new state.
+	var json = JSON.new()
+	if json.parse(response[3].get_string_from_utf8()) == OK and json.data is Dictionary:
+		var updated_props = json.data.get("properties", null)
+		if updated_props is Dictionary:
+			for obj in world_objects:
+				if obj is Dictionary and str(obj.get("id", "")) == obj_id:
+					obj["properties"] = updated_props
+					break
 
 func open_dialogue_panel(target_agent: String, focus_input: bool = true):
 	"""Set current conversation target and optionally focus input."""
@@ -1625,9 +2839,9 @@ func open_dialogue_panel(target_agent: String, focus_input: bool = true):
 	if dialogue_panel != null:
 		dialogue_panel.visible = true
 	if dialogue_target_label != null:
-		dialogue_target_label.text = "Talking to: " + active_dialogue_target
+		dialogue_target_label.text = "Talking to: " + (active_dialogue_target if active_dialogue_target != "" else "(broadcast)")
 	if dialogue_status != null:
-		dialogue_status.text = "Talking with " + active_dialogue_target
+		dialogue_status.text = "Shouting (nearest agent hears)" if active_dialogue_target == "" else "Talking with " + active_dialogue_target
 	if dialogue_input != null and focus_input:
 		dialogue_input.grab_focus()
 
@@ -1644,6 +2858,15 @@ func close_dialogue_panel(clear_target: bool = true):
 
 func is_dialogue_open() -> bool:
 	return dialogue_input != null and dialogue_input.has_focus()
+
+
+func should_suppress_context_menu_for_conversation() -> bool:
+	"""Avoid opening the context panel while waiting on dialogue or typing in the chat field (prevents layout glitches)."""
+	if dialogue_request_in_flight:
+		return true
+	if dialogue_input != null and dialogue_input.has_focus():
+		return true
+	return false
 
 func is_dialogue_text_input_active() -> bool:
 	return is_dialogue_open()
@@ -1739,9 +2962,10 @@ func _apply_conversations_from_response(conversations: Array) -> void:
 			continue
 
 		var signature = speaker + "::" + message
-		if signature == last_conversation_signature:
+		if signature == last_conversation_signature or _dialogue_signatures_seen.has(signature):
 			continue
 		last_conversation_signature = signature
+		_dialogue_signatures_seen[signature] = true
 
 		if speaker != player_name:
 			var speaker_nearby = can_interact(player_name, speaker)
@@ -1777,14 +3001,20 @@ func _submit_dialogue_message():
 	var message = dialogue_input.text.strip_edges()
 	if message == "":
 		return
-	var target_agent = _resolve_dialogue_target_for_player()
-	if target_agent == "":
-		if dialogue_status != null:
-			dialogue_status.text = "No one nearby to talk to"
-		return
-	active_dialogue_target = target_agent
-	if dialogue_target_label != null:
-		dialogue_target_label.text = "Talking to: " + active_dialogue_target
+	# Broadcast mode: active_dialogue_target == "" means shout — no specific target required
+	var is_broadcast = active_dialogue_target == ""
+	var target_agent = ""
+	if is_broadcast:
+		target_agent = ""  # server picks nearest listener
+	else:
+		target_agent = _resolve_dialogue_target_for_player()
+		if target_agent == "":
+			if dialogue_status != null:
+				dialogue_status.text = "No one nearby to talk to"
+			return
+		active_dialogue_target = target_agent
+		if dialogue_target_label != null:
+			dialogue_target_label.text = "Talking to: " + active_dialogue_target
 
 	append_dialogue_line(player_name, message)
 	if player_node != null and player_node.has_method("show_speech"):
@@ -1796,7 +3026,7 @@ func _submit_dialogue_message():
 		"",
 		get_player_position().x,
 		get_player_position().y,
-		"Speaking with " + target_agent,
+		"Speaking" + (" with " + target_agent if target_agent != "" else " aloud"),
 		message
 	)
 	dialogue_input.text = ""
@@ -1909,7 +3139,7 @@ func _on_state_received(result, response_code, headers, body, http):
 	var state = json.data
 	_update_world(state)
 	if world_objects.is_empty():
-		_fetch_objects()
+		_fetch_objects_async()
 
 func _update_world(state):
 	"""Update agent positions and states from backend data (delta or full)"""
@@ -2161,9 +3391,13 @@ func _process_turn():
 		"awarenessRadius": runtime_awareness_radius,
 		"forceDayStart": false
 	}
-	if last_runtime_request.has("playerX"):
+	# Server uses playerX/Y for awareness (findLocationAt). Must be the avatar's *current* world position,
+	# not the last move *destination* (last_runtime_request), or pathing/affordances desync mid-walk.
+	if player_node != null:
+		request_body["playerX"] = player_node.position.x
+		request_body["playerY"] = player_node.position.y
+	elif last_runtime_request.has("playerX"):
 		request_body["playerX"] = last_runtime_request["playerX"]
-	if last_runtime_request.has("playerY"):
 		request_body["playerY"] = last_runtime_request["playerY"]
 	if active_dialogue_target != "" and _is_agent_within_dialogue_range(active_dialogue_target):
 		request_body["pinnedAgents"] = [active_dialogue_target]
@@ -2206,10 +3440,23 @@ func _on_turn_processed(result, response_code, headers, body, http):
 		var response = json.data
 		# Always apply returned world state. A failed player action can still advance time/NPC runtime.
 		_update_agents_from_turn_response(response)
+		if player_node != null:
+			last_runtime_request["playerX"] = player_node.position.x
+			last_runtime_request["playerY"] = player_node.position.y
 		
 		var action_result = response.get("actionResult", {})
+		# Sync player inventory whenever the turn response includes playerState
+		var player_state = action_result.get("playerState", null)
+		if player_state is Dictionary and player_node != null and ("inventory" in player_node):
+			var inv_objects = player_state.get("inventoryObjects", [])
+			if inv_objects is Array and not inv_objects.is_empty():
+				player_node.inventory = inv_objects.duplicate()
+			else:
+				var inv_ids = player_state.get("inventory", [])
+				if inv_ids is Array:
+					player_node.inventory = inv_ids.duplicate()
+
 		if action_result.get("success", false):
-			print("Turn processed successfully")
 			if action_result.has("agentReplyText") and str(action_result.get("agentReplyText", "")) != "":
 				var speaker = str(action_result.get("agentReplySpeaker", active_dialogue_target))
 				var reply_text = str(action_result.get("agentReplyText", ""))
@@ -2230,8 +3477,14 @@ func _on_turn_processed(result, response_code, headers, body, http):
 		_set_dialogue_busy(false)
 	_dispatch_pending_context_followup_if_any()
 	if object_interaction_in_last_turn:
-		_fetch_objects()
 		object_interaction_in_last_turn = false
+		await _fetch_objects_async()
+		await _sync_player_inventory_async()
+		if carry_action_in_last_turn:
+			carry_action_in_last_turn = false
+			# Auto-show inventory panel so the player sees their newly acquired item
+			if context_action_panel == null or not context_action_panel.visible:
+				open_inventory_panel()
 	_dispatch_queued_move_if_any()
 	
 	if is_instance_valid(http):
@@ -2240,7 +3493,8 @@ func _on_turn_processed(result, response_code, headers, body, http):
 func _dispatch_pending_context_followup_if_any() -> void:
 	if pending_context_followup_action.is_empty():
 		return
-	if turn_request_in_flight or dialogue_request_in_flight:
+	# Do not block walk-to-interact on dialogue UI; only one turn HTTP chain at a time.
+	if turn_request_in_flight:
 		return
 	if player_node == null:
 		pending_context_followup_action = {}
@@ -2256,7 +3510,7 @@ func _dispatch_pending_context_followup_if_any() -> void:
 		var target_obj = _get_world_object_by_id(target_id)
 		if target_obj != null:
 			var object_world = snap_to_tile(Vector2(float(target_obj.get("x", target_world.x)), float(target_obj.get("y", target_world.y))))
-			target_world = _resolve_interaction_stand_tile(object_world)
+			target_world = _resolve_interaction_stand_tile(object_world, target_obj)
 			target_location = str(target_obj.get("location", target_location))
 	elif target_kind == "entity":
 		var entity_pos = _get_live_entity_position(target_id)
@@ -2269,7 +3523,17 @@ func _dispatch_pending_context_followup_if_any() -> void:
 	payload["targetLocation"] = target_location
 	pending_context_followup_action = payload
 
-	if tile_manhattan_distance_from_world(player_node.position, target_world) > 1:
+	var still_need_move = false
+	if target_kind == "object":
+		var tobj2 = _get_world_object_by_id(target_id)
+		if tobj2 != null:
+			var ow2 = snap_to_tile(Vector2(float(tobj2.get("x", target_world.x)), float(tobj2.get("y", target_world.y))))
+			still_need_move = not _player_within_object_interaction(player_node.position, ow2, tobj2)
+	elif target_world != Vector2.ZERO:
+		still_need_move = tile_manhattan_distance_from_world(player_node.position, target_world) > 1
+
+	if still_need_move and target_world != Vector2.ZERO:
+		player_has_local_movement = false
 		enqueue_player_action(
 			player_name,
 			"move",
@@ -2325,7 +3589,8 @@ func _update_agents_from_turn_response(response: Dictionary):
 			"y": float(agent_data.get("y", 0.0))
 		}
 		if player_node != null and agent_data.get("name", "") == player_name:
-			player_node.update_from_backend(agent_data, locations)
+			var force_pos = not pending_context_followup_action.is_empty()
+			player_node.update_from_backend(agent_data, locations, force_pos)
 
 	# Snapshot live node positions as anchors before any NPC steps so that
 	# approach pathing always targets actual pixel positions, not stale coords.
@@ -2341,6 +3606,7 @@ func _update_agents_from_turn_response(response: Dictionary):
 		var agent_node = agent_nodes[agent_name]
 		if is_instance_valid(agent_node) and agent_node.has_method("step_client_side"):
 			agent_node.step_client_side(self)
+			_apply_los_to_agent(agent_name, agent_node)
 			# Update anchor after the step so other NPCs see the new position next turn
 			entity_anchors[agent_name] = agent_node.position
 			agent_positions[agent_name] = {
@@ -2357,7 +3623,9 @@ func _update_agents_from_turn_response(response: Dictionary):
 
 	if conversations is Array:
 		_apply_conversations_from_response(conversations)
-	
+
+	# Refresh LOS-based visibility every turn so overlays follow the player
+	_redraw_object_overlays()
 	print("Updated ", agents_data.size(), " agents from turn response")
 
 func submit_player_movement(player_id: String, current_location: String, player_position: Vector2) -> void:
@@ -2423,6 +3691,15 @@ func _update_agent_from_response(agent_data: Dictionary):
 	if agent_nodes.has(agent_name):
 		var agent = agent_nodes[agent_name]
 		agent.update_from_backend(agent_data, locations)
+		_apply_los_to_agent(agent_name, agent)
+
+func _apply_los_to_agent(agent_name: String, agent_node) -> void:
+	"""Show/hide an agent node based on line-of-sight from the player."""
+	if player_node == null or not is_instance_valid(agent_node):
+		return
+	var agent_pos = agent_node.position
+	var visible_to_player = has_line_of_sight(player_node.position, agent_pos)
+	agent_node.modulate.a = 1.0 if visible_to_player else 0.0
 
 func _save_state():
 	"""Save current backend state to file"""
@@ -2505,6 +3782,7 @@ func _bootstrap_agent_schedules() -> void:
 	_set_loading(true, "Generating schedules for %d NPC(s)...\nThis may take a moment." % total)
 
 	var bhttp = HTTPRequest.new()
+	bhttp.timeout = 180.0  # 3-minute ceiling — LLM calls can be slow but shouldn't hang forever
 	add_child(bhttp)
 	var berr = bhttp.request(
 		backend_url + "/world/bootstrap",
@@ -2514,6 +3792,7 @@ func _bootstrap_agent_schedules() -> void:
 	)
 	if berr != OK:
 		bhttp.queue_free()
+		push_error("[BOOTSTRAP] Failed to send /world/bootstrap request")
 		return
 	var bresp = await bhttp.request_completed
 	bhttp.queue_free()
@@ -2522,6 +3801,8 @@ func _bootstrap_agent_schedules() -> void:
 		json.parse(bresp[3].get_string_from_utf8())
 		var res = json.data.get("result", {})
 		print("[BOOTSTRAP] Done. Bootstrapped: ", res.get("bootstrapped", []), " | Skipped: ", res.get("skipped", []))
+	elif bresp[1] == -1:
+		push_error("[BOOTSTRAP] Schedule bootstrap timed out after 3 minutes — continuing without schedules")
 	else:
 		push_error("[BOOTSTRAP] Schedule bootstrap failed with code: " + str(bresp[1]))
 
@@ -2824,15 +4105,21 @@ func _redraw_object_overlays():
 	for child in object_overlays.get_children():
 		child.queue_free()
 
+	var player_pos_for_los = player_node.position if player_node != null else Vector2.ZERO
 	for obj in world_objects:
 		if not (obj is Dictionary):
 			continue
+		if _is_object_held(obj):
+			continue  # held items live in inventory, not in the world
 
 		var object_type = str(obj.get("type", "fixture"))
 		var object_name = str(obj.get("name", obj.get("id", "object")))
 		var tile_origin = snap_to_tile(Vector2(float(obj.get("x", 0.0)), float(obj.get("y", 0.0))))
 		var tile_center = tile_to_world_center(world_to_tile(tile_origin))
 		var properties = obj.get("properties", {})
+
+		# Walls always drawn; other objects fade when outside LOS
+		var in_los = object_type == "wall" or has_line_of_sight(player_pos_for_los, tile_origin)
 
 		var color = _get_object_type_color(object_type)
 		var radius = _get_object_marker_radius(object_type)
@@ -2851,11 +4138,16 @@ func _redraw_object_overlays():
 			zone_border.points = _make_circle_points(tile_center, zone_radius, 24)
 			object_overlays.add_child(zone_border)
 
+		var los_alpha = 1.0 if in_los else 0.15
 		var marker = _make_object_marker(object_type, tile_center, radius, color)
+		marker.modulate.a = los_alpha
 		object_overlays.add_child(marker)
 
 		if object_type == "wall":
 			continue
+
+		if not in_los:
+			continue  # don't draw labels for out-of-sight objects
 
 		var label = Label.new()
 		label.text = "%s (%s)" % [object_name, object_type]

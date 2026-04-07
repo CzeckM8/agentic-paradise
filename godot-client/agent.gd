@@ -168,7 +168,7 @@ func step_client_side(bc: Node) -> void:
 		_step_idle_routine(bc)
 		return
 
-	var next_step = _compute_next_step_astar(bc, position, waypoint, 2048)
+	var next_step = _compute_next_step_astar(bc, position, waypoint, 8192)
 	if next_step == Vector2.ZERO:
 		return
 
@@ -240,6 +240,10 @@ func _compute_waypoint(bc: Node) -> Vector2:
 
 	if nearest_anchor != Vector2.ZERO:
 		var interior = _interior_door_target(bc, nearest_anchor, loc_data)
+		# If the computed interior tile is itself walled (e.g. two buildings share a border),
+		# fall back to the door anchor tile which is guaranteed passable.
+		if bc.is_coordinate_blocked(interior):
+			interior = bc.snap_to_tile(nearest_anchor)
 		if position.distance_to(interior) <= bc.get_tile_size() * 1.0:
 			var at_loc = bc.get_location_name_for_position(position, "")
 			if at_loc == target_location:
@@ -301,12 +305,27 @@ func _find_world_object_by_id(bc: Node, object_id) -> Dictionary:
 			return obj
 	return {}
 
-func _compute_next_step_astar(bc: Node, from_pos: Vector2, to_pos: Vector2, max_expansions: int = 2048) -> Vector2:
+func _compute_next_step_astar(bc: Node, from_pos: Vector2, to_pos: Vector2, max_expansions: int = 8192) -> Vector2:
 	"""Return a one-tile cardinal step using A* over the 32px grid."""
 	var start_tile: Vector2i = bc.world_to_tile(from_pos)
 	var goal_tile: Vector2i = bc.world_to_tile(to_pos)
 	if start_tile == goal_tile:
 		return Vector2.ZERO
+
+	# If the goal tile itself is blocked (e.g. interior door target landed on a wall),
+	# promote to the nearest passable cardinal neighbour of the goal so the NPC can
+	# still navigate as close as possible instead of failing outright.
+	if bc.is_coordinate_blocked(bc.tile_to_world(goal_tile)):
+		var best_fallback = goal_tile
+		var best_dist = INF
+		for dir in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var nb = goal_tile + dir
+			if not bc.is_coordinate_blocked(bc.tile_to_world(nb)):
+				var d = _manhattan(start_tile, nb)
+				if d < best_dist:
+					best_dist = d
+					best_fallback = nb
+		goal_tile = best_fallback
 
 	var open: Array = [{"tile": start_tile, "g": 0, "f": _manhattan(start_tile, goal_tile)}]
 	var came_from: Dictionary = {}

@@ -138,7 +138,11 @@ func _input(event):
 
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-			if backend_connector and not action_locked and not backend_connector.is_dialogue_open():
+			if backend_connector and not action_locked:
+				if backend_connector.is_dialogue_open():
+					return
+				if backend_connector.has_method("should_suppress_context_menu_for_conversation") and backend_connector.should_suppress_context_menu_for_conversation():
+					return
 				var world_pos = backend_connector.viewport_to_world(event.position)
 				var world_click = backend_connector.tile_to_world(backend_connector.world_to_tile(world_pos))
 				backend_connector.open_context_action_panel_at(world_click)
@@ -149,6 +153,12 @@ func _input(event):
 			backend_connector.cancel_pending_context_followup_action()
 
 		if action_locked:
+			held_move_dir = Vector2.ZERO
+			return
+
+		# Block movement if any text input (write panel, dialogue input, etc.) has focus.
+		var focus_owner = get_viewport().gui_get_focus_owner()
+		if focus_owner is LineEdit or focus_owner is TextEdit:
 			held_move_dir = Vector2.ZERO
 			return
 
@@ -402,19 +412,20 @@ func _get_nearby_agents() -> Array:
 		nearby.append(candidate["name"])
 	return nearby
 
-func update_from_backend(data: Dictionary, _location_map: Dictionary):
+func update_from_backend(data: Dictionary, _location_map: Dictionary, force_position_from_server: bool = false):
 	"""Update player state from backend data.
 	
 	One-time startup sync is allowed so save-state/server position and local node
 	are aligned before the player starts moving. After the first local movement,
-	position becomes client-authoritative again."""
+	position becomes client-authoritative again unless force_position_from_server
+	(e.g. walk-to-interact pathing) is true."""
 	player_name = data.get("name", "Player")
 	current_activity = data.get("activity", current_activity)
 	current_location = data.get("location", current_location)
 	stress_level = data.get("stress", 0.5)
 
-	var allow_position_sync = false
-	if backend_connector and backend_connector.has_method("should_sync_player_position_from_backend"):
+	var allow_position_sync = force_position_from_server
+	if not allow_position_sync and backend_connector and backend_connector.has_method("should_sync_player_position_from_backend"):
 		allow_position_sync = backend_connector.should_sync_player_position_from_backend()
 	if allow_position_sync and data.has("x") and data.has("y"):
 		var server_pos = Vector2(float(data.get("x", position.x)), float(data.get("y", position.y)))

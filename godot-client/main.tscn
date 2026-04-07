@@ -45,6 +45,7 @@ Blue circle = Player
 Diamond markers = NPCs"
 
 [node name="DialoguePanel" type="Panel" parent="UI" unique_id=1317299073]
+clip_contents = true
 visible = true
 offset_left = 10.0
 offset_top = -250.0
@@ -71,7 +72,10 @@ text = "Talking to: (none)"
 custom_minimum_size = Vector2(0, 90)
 layout_mode = 2
 size_flags_vertical = 3
+scroll_active = true
 scroll_following = true
+autowrap_mode = 3
+fit_content = false
 
 [node name="DialogueInputRow" type="HBoxContainer" parent="UI/DialoguePanel/DialogueVBox" unique_id=576388621]
 layout_mode = 2
