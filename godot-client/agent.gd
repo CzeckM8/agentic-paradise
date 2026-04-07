@@ -312,20 +312,15 @@ func _compute_next_step_astar(bc: Node, from_pos: Vector2, to_pos: Vector2, max_
 	if start_tile == goal_tile:
 		return Vector2.ZERO
 
-	# If the goal tile itself is blocked (e.g. interior door target landed on a wall),
-	# promote to the nearest passable cardinal neighbour of the goal so the NPC can
-	# still navigate as close as possible instead of failing outright.
-	if bc.is_coordinate_blocked(bc.tile_to_world(goal_tile)):
-		var best_fallback = goal_tile
-		var best_dist = INF
-		for dir in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
-			var nb = goal_tile + dir
-			if not bc.is_coordinate_blocked(bc.tile_to_world(nb)):
-				var d = _manhattan(start_tile, nb)
-				if d < best_dist:
-					best_dist = d
-					best_fallback = nb
-		goal_tile = best_fallback
+	# If the goal tile is blocked, substitute the closest passable tile by Manhattan
+	# distance to the intended goal (cardinals first, then wider rings). Tie-break
+	# with distance to start so the approach path stays reasonable. No substitute → stuck.
+	var resolved_goal = _resolve_blocked_astar_goal(bc, goal_tile, start_tile, 32)
+	if resolved_goal == null:
+		return Vector2.ZERO
+	goal_tile = resolved_goal
+	if start_tile == goal_tile:
+		return Vector2.ZERO
 
 	var open: Array = [{"tile": start_tile, "g": 0, "f": _manhattan(start_tile, goal_tile)}]
 	var came_from: Dictionary = {}
@@ -435,6 +430,55 @@ func _is_within_location(world_pos: Vector2, loc_data: Dictionary) -> bool:
 
 func _manhattan(a: Vector2i, b: Vector2i) -> int:
 	return abs(a.x - b.x) + abs(a.y - b.y)
+
+## Tiles at exactly Manhattan distance `r` from `center` (diamond perimeter).
+func _manhattan_ring(center: Vector2i, r: int) -> Array:
+	var out: Array = []
+	if r <= 0:
+		return [center]
+	for dx in range(-r, r + 1):
+		var adx = abs(dx)
+		var dy_rem = r - adx
+		var x = center.x + dx
+		if dy_rem == 0:
+			out.append(Vector2i(x, center.y))
+		else:
+			out.append(Vector2i(x, center.y + dy_rem))
+			out.append(Vector2i(x, center.y - dy_rem))
+	return out
+
+func _tile_in_world_bounds(bc: Node, tile: Vector2i) -> bool:
+	var p = bc.tile_to_world(tile)
+	var bounds = bc.get_world_bounds()
+	return p.x >= float(bounds.get("minX", 0.0)) and p.x <= float(bounds.get("maxX", 1800.0)) \
+		and p.y >= float(bounds.get("minY", 0.0)) and p.y <= float(bounds.get("maxY", 1200.0))
+
+## When the pathfinding goal sits on a blocked tile, pick a passable substitute that
+## minimizes Manhattan distance to the intended goal; tie-break with distance from `start_tile`.
+## Returns null if no passable tile exists within `max_radius`.
+func _resolve_blocked_astar_goal(bc: Node, intended_goal: Vector2i, start_tile: Vector2i, max_radius: int = 32) -> Variant:
+	if not bc.is_coordinate_blocked(bc.tile_to_world(intended_goal)):
+		return intended_goal
+	for r in range(1, max_radius + 1):
+		var pool: Array = []
+		for t in _manhattan_ring(intended_goal, r):
+			if not _tile_in_world_bounds(bc, t):
+				continue
+			if bc.is_coordinate_blocked(bc.tile_to_world(t)):
+				continue
+			pool.append(t)
+		if pool.is_empty():
+			continue
+		var pick: Vector2i = pool[0]
+		var best_to_start = _manhattan(start_tile, pick)
+		for i in range(1, pool.size()):
+			var cand: Vector2i = pool[i]
+			var ds = _manhattan(start_tile, cand)
+			if ds < best_to_start:
+				best_to_start = ds
+				pick = cand
+		return pick
+	return null
 
 func _tile_key(tile: Vector2i) -> String:
 	return str(tile.x) + "," + str(tile.y)
