@@ -239,19 +239,22 @@ func _compute_waypoint(bc: Node) -> Vector2:
 				nearest_anchor = anchor_pos
 
 	if nearest_anchor != Vector2.ZERO:
-		var interior = _interior_door_target(bc, nearest_anchor, loc_data)
-		# If the computed interior tile is itself walled (e.g. two buildings share a border),
-		# fall back to the door anchor tile which is guaranteed passable.
-		if bc.is_coordinate_blocked(interior):
-			interior = bc.snap_to_tile(nearest_anchor)
-		if position.distance_to(interior) <= bc.get_tile_size() * 1.0:
-			var at_loc = bc.get_location_name_for_position(position, "")
-			if at_loc == target_location:
-				return center
-		return interior
+		var raw_interior = _interior_door_target(bc, nearest_anchor, loc_data)
+		var anchor_snap = bc.snap_to_tile(nearest_anchor)
+		var interior = _resolve_passable_door_waypoint(bc, raw_interior, anchor_snap, position)
+		if interior != Vector2.ZERO:
+			if position.distance_to(interior) <= bc.get_tile_size() * 1.0:
+				var at_loc = bc.get_location_name_for_position(position, "")
+				if at_loc == target_location:
+					return center
+			return interior
+		return _clamped_interior_waypoint(bc, loc_data)
 
 	# No anchor — choose an interior waypoint (not edge/border) to avoid
 	# floor/snap mismatch that can stick goals just outside large open areas.
+	return _clamped_interior_waypoint(bc, loc_data)
+
+func _clamped_interior_waypoint(bc: Node, loc_data: Dictionary) -> Vector2:
 	var ts = bc.get_tile_size()
 	var min_x = float(loc_data.get("minX", 0.0))
 	var max_x = float(loc_data.get("maxX", 0.0))
@@ -261,7 +264,6 @@ func _compute_waypoint(bc: Node) -> Vector2:
 	var interior_max_x = max_x - ts
 	var interior_min_y = min_y + ts
 	var interior_max_y = max_y - ts
-	# Handle very narrow locations safely.
 	if interior_min_x > interior_max_x:
 		interior_min_x = min_x
 		interior_max_x = max_x
@@ -479,6 +481,23 @@ func _resolve_blocked_astar_goal(bc: Node, intended_goal: Vector2i, start_tile: 
 				pick = cand
 		return pick
 	return null
+
+## Door approach: prefer interior tile, then snapped anchor; if both register as blocked,
+## use the same Manhattan-ring search as A* (from the agent) so the waypoint is passable when possible.
+## Returns Vector2.ZERO if no passable substitute exists (caller must fall back, e.g. clamped interior).
+func _resolve_passable_door_waypoint(bc: Node, interior_world: Vector2, anchor_world: Vector2, agent_pos: Vector2) -> Vector2:
+	if not bc.is_coordinate_blocked(interior_world):
+		return interior_world
+	if not bc.is_coordinate_blocked(anchor_world):
+		return anchor_world
+	var start_tile = bc.world_to_tile(agent_pos)
+	var ri = _resolve_blocked_astar_goal(bc, bc.world_to_tile(interior_world), start_tile, 32)
+	if ri != null:
+		return bc.tile_to_world(ri)
+	var ra = _resolve_blocked_astar_goal(bc, bc.world_to_tile(anchor_world), start_tile, 32)
+	if ra != null:
+		return bc.tile_to_world(ra)
+	return Vector2.ZERO
 
 func _tile_key(tile: Vector2i) -> String:
 	return str(tile.x) + "," + str(tile.y)
