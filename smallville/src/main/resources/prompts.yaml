@@ -163,6 +163,7 @@ agent:
     Innate Traits: {{agent.traits}}
     Characteristics: {{agent.description}}
     Current Location: {{agent.locationName}}
+    Carrying: {{agent.inventory}}
 
     {{date.full}}
 

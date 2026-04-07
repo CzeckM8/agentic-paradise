@@ -61,6 +61,12 @@ public class TemplateMapper {
 	 * between the current time and the next time.
 	 */
 	result.put("plansBlock", buildPlansBlock(agent.getFullName(), stream.getPlans()));
+
+	// Inventory: what the agent is currently carrying (kept in sync by SimulationService)
+	java.util.List<String> carried = agent.getCarriedItemNames();
+	result.put("inventory", carried == null || carried.isEmpty() ? "nothing" : String.join(", ", carried));
+	result.put("hasInventory", carried != null && !carried.isEmpty());
+
 	return result;
     }
 
