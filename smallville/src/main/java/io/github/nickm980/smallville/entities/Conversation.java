@@ -30,6 +30,13 @@ public class Conversation {
 	return messages.size();
     }
 
+    public void addDialog(Dialog dialog) {
+	if (dialog == null) {
+	    return;
+	}
+	messages.add(dialog);
+    }
+
     public String getTalker() {
 	return agent;
     }

@@ -8,6 +8,9 @@ import java.util.List;
 import io.github.nickm980.smallville.memory.Characteristic;
 import io.github.nickm980.smallville.memory.MemoryStream;
 
+import java.util.HashMap;
+import java.util.Map;
+
 public class Agent {
 
     private MemoryStream memories;
@@ -28,6 +31,26 @@ public class Agent {
     private boolean hasBeenOrchestrated = false; // Prevents movement on first turn after creation
     private final Deque<AgentAction> actionQueue = new ArrayDeque<>();
     private AgentAction activeAction;
+    private boolean deferScriptedActivityPresentation;
+
+    /**
+     * Typed inventory: itemId → InventoryItem.
+     * ActionResolver reads this to enforce grant-gated verbs.
+     */
+    private final Map<String, InventoryItem> inventory = new HashMap<>();
+
+    /**
+     * Human-readable names of world objects currently in the agent's legacy inventory.
+     * Kept in sync by SimulationService so LLM prompts can reference what the agent carries.
+     */
+    private List<String> carriedItemNames = new ArrayList<>();
+
+    /**
+     * What this agent believes to be true about the world.
+     * Populated only from PerceptionChannel and BeliefCorrections —
+     * never from raw Chronicle data.
+     */
+    private final EpistemicMemory epistemicMemory = new EpistemicMemory();
     
     public Agent(String name, List<Characteristic> characteristics, String currentAction, Location location) {
 	this.name = name;
@@ -195,6 +218,14 @@ public class Agent {
 	this.hasBeenOrchestrated = orchestrated;
     }
 
+    public boolean isDeferScriptedActivityPresentation() {
+	return deferScriptedActivityPresentation;
+    }
+
+    public void setDeferScriptedActivityPresentation(boolean deferScriptedActivityPresentation) {
+	this.deferScriptedActivityPresentation = deferScriptedActivityPresentation;
+    }
+
     public AgentAction getActiveAction() {
         return activeAction == null ? null : activeAction.copy();
     }
@@ -237,6 +268,7 @@ public class Agent {
         activeAction = null;
         actionQueue.clear();
         targetLocation = null;
+        deferScriptedActivityPresentation = false;
         enqueueActions(actions);
     }
 
@@ -266,5 +298,38 @@ public class Agent {
         activeAction = null;
         actionQueue.clear();
         targetLocation = null;
+        deferScriptedActivityPresentation = false;
+    }
+
+    // ── Inventory ────────────────────────────────────────────────────────────
+
+    public Map<String, InventoryItem> getInventory() {
+        return inventory;
+    }
+
+    public void addInventoryItem(InventoryItem item) {
+        inventory.put(item.getId(), item);
+    }
+
+    public InventoryItem removeInventoryItem(String itemId) {
+        return inventory.remove(itemId);
+    }
+
+    public boolean hasInventoryItem(String itemId) {
+        return inventory.containsKey(itemId);
+    }
+
+    public List<String> getCarriedItemNames() {
+        return carriedItemNames;
+    }
+
+    public void setCarriedItemNames(List<String> names) {
+        this.carriedItemNames = names == null ? new ArrayList<>() : names;
+    }
+
+    // ── Epistemic memory ─────────────────────────────────────────────────────
+
+    public EpistemicMemory getEpistemicMemory() {
+        return epistemicMemory;
     }
 }

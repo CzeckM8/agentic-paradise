@@ -76,6 +76,21 @@ public class World {
         return toRemove.size();
     }
 
+    /**
+     * Reuse one thread between two agents instead of creating duplicate conversation records.
+     */
+    public Optional<Conversation> findConversationBetween(String participantA, String participantB) {
+	if (participantA == null || participantB == null || participantA.isBlank() || participantB.isBlank()) {
+	    return Optional.empty();
+	}
+	for (Conversation c : conversations.all()) {
+	    if (c != null && c.isPartOfConversation(participantA) && c.isPartOfConversation(participantB)) {
+		return Optional.of(c);
+	    }
+	}
+	return Optional.empty();
+    }
+
     public List<Conversation> getConversationsAfter(LocalDateTime time) {
 	return conversations.all();
     }

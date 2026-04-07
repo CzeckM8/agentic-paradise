@@ -13,7 +13,6 @@ import io.github.nickm980.smallville.memory.MemoryStream;
 public class Player extends Agent {
 
 	private double stress = 0.5;  // 0.0 (calm) to 1.0 (panicked)
-	private String[] inventory = new String[0];
 	private int numInteractions = 0;
 	
 	public Player(String name, Location location) {
@@ -42,32 +41,22 @@ public class Player extends Agent {
 		setStress(stress - amount);
 	}
 
-	public String[] getInventory() {
-		return inventory;
+	/**
+	 * Add a legacy string item as a basic InventoryItem with no grants.
+	 * Use addInventoryItem(InventoryItem) for full grant support.
+	 */
+	public void addItem(String itemTypeId) {
+		addInventoryItem(new InventoryItem(itemTypeId, itemTypeId));
 	}
 
-	public void setInventory(String[] inventory) {
-		this.inventory = inventory;
-	}
-
-	public void addItem(String item) {
-		String[] newInventory = new String[inventory.length + 1];
-		System.arraycopy(inventory, 0, newInventory, 0, inventory.length);
-		newInventory[inventory.length] = item;
-		this.inventory = newInventory;
-	}
-
-	public void removeItem(String item) {
-		String[] newInventory = new String[Math.max(0, inventory.length - 1)];
-		int index = 0;
-		for (String i : inventory) {
-			if (!i.equals(item)) {
-				if (index < newInventory.length) {
-					newInventory[index++] = i;
-				}
-			}
-		}
-		this.inventory = newInventory;
+	/**
+	 * Remove the first inventory item matching the given typeId.
+	 */
+	public void removeItem(String itemTypeId) {
+		getInventory().values().stream()
+			.filter(i -> itemTypeId.equals(i.getTypeId()))
+			.findFirst()
+			.ifPresent(i -> removeInventoryItem(i.getId()));
 	}
 
 	public int getNumInteractions() {
