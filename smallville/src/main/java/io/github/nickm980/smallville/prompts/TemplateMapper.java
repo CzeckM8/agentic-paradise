@@ -67,6 +67,13 @@ public class TemplateMapper {
 	result.put("inventory", carried == null || carried.isEmpty() ? "nothing" : String.join(", ", carried));
 	result.put("hasInventory", carried != null && !carried.isEmpty());
 
+	// Legal actions: computed by ActionResolver before each LLM call
+	java.util.List<String> legal = agent.getLegalActions();
+	result.put("legalActions", legal == null || legal.isEmpty()
+		? "wait"
+		: String.join(", ", legal));
+	result.put("hasLegalActions", legal != null && !legal.isEmpty());
+
 	return result;
     }
 

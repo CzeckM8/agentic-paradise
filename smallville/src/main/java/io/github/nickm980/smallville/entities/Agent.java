@@ -46,6 +46,13 @@ public class Agent {
     private List<String> carriedItemNames = new ArrayList<>();
 
     /**
+     * Transient: legal actions available to this agent right now.
+     * Set by SimulationService before each LLM planning call via ActionResolver.
+     * Not persisted; cleared after use.
+     */
+    private List<String> legalActions = new ArrayList<>();
+
+    /**
      * What this agent believes to be true about the world.
      * Populated only from PerceptionChannel and BeliefCorrections —
      * never from raw Chronicle data.
@@ -325,6 +332,16 @@ public class Agent {
 
     public void setCarriedItemNames(List<String> names) {
         this.carriedItemNames = names == null ? new ArrayList<>() : names;
+    }
+
+    // ── Legal actions (transient — set by SimulationService before LLM calls) ──
+
+    public List<String> getLegalActions() {
+        return legalActions;
+    }
+
+    public void setLegalActions(List<String> legalActions) {
+        this.legalActions = legalActions == null ? new ArrayList<>() : legalActions;
     }
 
     // ── Epistemic memory ─────────────────────────────────────────────────────

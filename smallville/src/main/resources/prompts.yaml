@@ -72,9 +72,11 @@ plans:
     Daily Requirement: {{#agent.plans}}{{description}};{{/agent.plans}}
     Relevant Memories: {{#memories.relevant}}{{description}}; {{/memories.relevant}}
     Observation: {{observation}}
-    
+    Available actions right now: {{agent.legalActions}}
+
     * Give a duration for every plan
-    
+    * Only use actions from the Available actions list when interacting with objects or people
+
     Break down {{agent.name}}'s plan for the next hour starting at the current time.
 
     The current time is {{date.time}}
@@ -164,6 +166,7 @@ agent:
     Characteristics: {{agent.description}}
     Current Location: {{agent.locationName}}
     Carrying: {{agent.inventory}}
+    Available actions right now: {{agent.legalActions}}
 
     {{date.full}}
 
