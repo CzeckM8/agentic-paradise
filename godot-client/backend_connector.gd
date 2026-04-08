@@ -1259,6 +1259,20 @@ func _create_player(player_data):
 	# Delegate to the async version but don't await it.
 	_create_player_async(player_data)
 
+func _attach_world_camera_to_player(player_nd: Node2D) -> void:
+	"""Reparent World/Camera under the player so it moves with grid position automatically."""
+	if world_camera == null or not is_instance_valid(world_camera) or player_nd == null:
+		return
+	if world_camera.get_parent() == player_nd:
+		return
+	world_camera.reparent(player_nd, false)
+	if world_camera.has_method("reset_smoothing"):
+		world_camera.reset_smoothing()
+	if world_camera is Camera2D:
+		(world_camera as Camera2D).enabled = true
+		if (world_camera as Camera2D).has_method("make_current"):
+			(world_camera as Camera2D).make_current()
+
 func _create_player_async(player_data) -> void:
 	"""Async POST request to create a player character. Awaitable.
 	The player node is always spawned regardless of server response so the
@@ -1272,6 +1286,8 @@ func _create_player_async(player_data) -> void:
 		agents_container.add_child(player_node_instance)
 		player_node = player_node_instance
 		print("Spawned player node: ", player_node_instance.name)
+		# Keep the view centered on the player: Camera2D follows as a child (avoids canvas/local space bugs).
+		_attach_world_camera_to_player(player_node_instance)
 		# Small delay to let _ready() run on the new node
 		await get_tree().create_timer(0.1).timeout
 
