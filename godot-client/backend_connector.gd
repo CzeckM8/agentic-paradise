@@ -105,6 +105,10 @@ var property_action_rules: Dictionary = {
 	"carriable": [
 		{"actionKey": "carry", "label": "Carry", "actionType": "interact", "description": "Carrying"}
 	],
+	# held_by_player is set client-side when deriving properties for inventory items on the ground
+	"held_by_player": [
+		{"actionKey": "drop", "label": "Drop", "actionType": "interact", "description": "Dropping"}
+	],
 	"transition_point": [
 		{"actionKey": "unlock", "label": "Unlock", "actionType": "interact", "description": "Unlocking",
 		 "requiresAny": ["key", "lockpick"]},
@@ -2147,6 +2151,9 @@ func _derive_target_properties(target_row: Dictionary) -> Dictionary:
 			# pocket_size implies the object can be carried (backpack-carryable)
 			if _is_truthy(merged.get("pocket_size", false)) and not merged.has("carriable"):
 				merged["carriable"] = true
+			# Mark items held by the player so the Drop action appears
+			if str(merged.get("heldBy", "")) == player_name:
+				merged["held_by_player"] = true
 
 			# Ensure transition_point is set for door-like legacy objects
 			if _contains_tag(merged, "entrance") or _contains_tag(merged, "door"):
@@ -2310,6 +2317,28 @@ func _derive_actions_from_properties(kind: String, target_id: String, target_nam
 				rule.get("description", "Using on"), rule.get("label", action_key.capitalize()),
 				kind, target_id, target_name, distance)
 
+	# ── Throw (universal: any target within range when player has inventory) ──
+	if _player_has_any_inventory() and not seen_keys.has("throw"):
+		var throw_max_dist := 4.0
+		if distance <= throw_max_dist and not _is_truthy(properties.get("heavy", false)):
+			seen_keys["throw"] = true
+			actions.append({
+				"label": "Throw...",
+				"actionType": "interact",
+				"targetKind": kind,
+				"targetId": target_id,
+				"targetName": target_name,
+				"distance": distance,
+				"hint": "Throw an item at %s" % target_name,
+				"needsInventoryPick": true,
+				"inventoryPickMode": "throw",
+				"payload": {
+					"targetAgent": ("object:" + target_id) if kind == "object" else target_id,
+					"actionDescription": "Throwing at %s" % target_name,
+					"flair": "action:throw"
+				}
+			})
+
 	return actions
 
 ## Helper: build and append one action dict to the list.
@@ -2380,31 +2409,128 @@ func _contains_tag(properties: Dictionary, tag_name: String) -> bool:
 			return true
 	return false
 
+## Category assignment for an action key.
+const ACTION_CATEGORIES := {
+	"inspect": "Examine", "observe": "Examine", "read": "Examine",
+	"talk": "Social", "trade": "Social",
+	"carry": "Items", "drop": "Items", "place_object": "Items",
+	"write": "Items", "study": "Items", "light": "Items",
+	"unlock": "Items", "lock": "Items",
+	"heal": "Items", "apply_herbs": "Items",
+	"cut": "Items", "carve": "Items", "bind": "Items",
+	"climb_rope": "Items", "unlock_pick": "Items",
+	"throw": "Combat",
+	"open": "Interact", "close": "Interact", "climb": "Interact", "sit": "Interact",
+	"attack": "Combat", "punch": "Combat", "kick": "Combat",
+	"shove": "Combat", "grab": "Combat",
+}
+
+func _action_category(action_key: String) -> String:
+	return ACTION_CATEGORIES.get(action_key, "Interact")
+
+## Nested context menu state — populated in _render_grouped_context_actions.
+var _context_menu_groups: Array = []
+
 func _render_grouped_context_actions(groups: Array) -> void:
+	_context_menu_groups = groups
+	_show_category_level()
+
+## Level 1: show one category-button per category that has at least one action.
+func _show_category_level() -> void:
 	_clear_context_action_buttons()
 	if context_action_status != null:
-		context_action_status.text = "Select an action" if groups.size() > 0 else "No interactables on clicked tile"
+		context_action_status.text = "Select a category" if _context_menu_groups.size() > 0 else "No interactables on clicked tile"
 	if context_action_list == null:
 		return
 
-	for group in groups:
-		if not (group is Dictionary):
-			continue
+	var cat_order = ["Examine", "Social", "Interact", "Items", "Combat"]
+
+	# Collect which categories are present across all groups
+	var present_cats: Dictionary = {}
+	for group in _context_menu_groups:
+		if not (group is Dictionary): continue
+		var group_actions = group.get("actions", [])
+		if not (group_actions is Array): continue
+		for action in group_actions:
+			if not (action is Dictionary): continue
+			var flair = str(action.get("payload", {}).get("flair", ""))
+			var ak = flair.trim_prefix("action:")
+			var cat = _action_category(ak)
+			present_cats[cat] = true
+
+	# Target headers for context (non-interactive)
+	for group in _context_menu_groups:
+		if not (group is Dictionary): continue
 		var header = Label.new()
-		header.text = "%s (%.0f)" % [str(group.get("targetName", "target")), float(group.get("distance", 0.0))]
+		header.text = "%s (%.0f tiles)" % [str(group.get("targetName", "target")), float(group.get("distance", 0.0))]
 		header.add_theme_font_size_override("font_size", 11)
 		header.modulate = Color(0.95, 0.95, 0.75, 0.95)
 		context_action_list.add_child(header)
 
+	# Separator
+	var sep = HSeparator.new()
+	context_action_list.add_child(sep)
+
+	# Category buttons
+	for cat in cat_order:
+		if not present_cats.has(cat): continue
+		var btn = Button.new()
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.text = cat + "  ▶"
+		btn.pressed.connect(_on_category_selected.bind(cat))
+		context_action_list.add_child(btn)
+	for cat in present_cats.keys():
+		if cat_order.has(cat): continue
+		var btn = Button.new()
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.text = cat + "  ▶"
+		btn.pressed.connect(_on_category_selected.bind(cat))
+		context_action_list.add_child(btn)
+
+	_fit_context_panel()
+
+func _on_category_selected(category: String) -> void:
+	_show_action_level(category)
+
+## Level 2: show back button + all actions in the selected category.
+func _show_action_level(category: String) -> void:
+	_clear_context_action_buttons()
+	if context_action_status != null:
+		context_action_status.text = "[%s]" % category
+	if context_action_list == null:
+		return
+
+	# Back button
+	var back_btn = Button.new()
+	back_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	back_btn.text = "◀  Back"
+	back_btn.pressed.connect(_show_category_level)
+	context_action_list.add_child(back_btn)
+
+	for group in _context_menu_groups:
+		if not (group is Dictionary): continue
 		var group_actions = group.get("actions", [])
-		if not (group_actions is Array):
-			continue
+		if not (group_actions is Array): continue
+
+		var cat_actions: Array = []
 		for action in group_actions:
-			if not (action is Dictionary):
-				continue
+			if not (action is Dictionary): continue
+			var flair = str(action.get("payload", {}).get("flair", ""))
+			var ak = flair.trim_prefix("action:")
+			if _action_category(ak) == category:
+				cat_actions.append(action)
+		if cat_actions.is_empty(): continue
+
+		var header = Label.new()
+		header.text = "%s (%.0f tiles)" % [str(group.get("targetName", "target")), float(group.get("distance", 0.0))]
+		header.add_theme_font_size_override("font_size", 11)
+		header.modulate = Color(0.95, 0.95, 0.75, 0.95)
+		context_action_list.add_child(header)
+
+		for action in cat_actions:
 			var button = Button.new()
 			button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			button.text = "  - " + str(action.get("label", "Action"))
+			button.text = "  " + str(action.get("label", "Action"))
 			button.tooltip_text = str(action.get("hint", ""))
 			button.pressed.connect(_on_context_action_selected.bind(action))
 			context_action_list.add_child(button)
@@ -2453,6 +2579,94 @@ func _fit_context_panel() -> void:
 	vbox.set_offset(SIDE_RIGHT,  panel_w - 10.0)
 	vbox.set_offset(SIDE_BOTTOM, panel_h - 10.0)
 
+## Opens the context panel in "inventory picker" mode for place/throw.
+## The caller action dict is stored and re-executed with the chosen item ID.
+var _inventory_pick_pending_action: Dictionary = {}
+
+func _open_inventory_picker(source_action: Dictionary) -> void:
+	if player_node == null or not ("inventory" in player_node):
+		return
+	var inv = player_node.inventory
+	if not (inv is Array) or inv.is_empty():
+		if context_action_status != null:
+			context_action_status.text = "Inventory is empty."
+		return
+
+	_inventory_pick_pending_action = source_action
+	_clear_context_action_buttons()
+	if context_action_title != null:
+		var action_key = str(source_action.get("payload", {}).get("flair", "")).trim_prefix("action:")
+		context_action_title.text = ("Place which item?" if action_key == "place_object" else "Throw which item?")
+	if context_action_status != null:
+		context_action_status.text = "Choose from inventory:"
+
+	for item in inv:
+		if not (item is Dictionary): continue
+		var item_id = str(item.get("id", ""))
+		var item_name = str(item.get("name", item_id))
+		if item_id == "": continue
+		var button = Button.new()
+		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		button.text = "  " + item_name
+		button.pressed.connect(_on_inventory_pick_selected.bind(item_id, item_name))
+		context_action_list.add_child(button)
+
+	_fit_context_panel()
+
+func _on_inventory_pick_selected(item_id: String, item_name: String) -> void:
+	var action = _inventory_pick_pending_action.duplicate(true)
+	_inventory_pick_pending_action = {}
+	if action.is_empty() or player_node == null: return
+
+	var payload: Dictionary = action.get("payload", {})
+	payload["item"] = item_id
+	action["payload"] = payload
+
+	var flair = str(payload.get("flair", ""))
+	var action_key = flair.trim_prefix("action:")
+	var target_kind = str(action.get("targetKind", ""))
+	var target_id = str(action.get("targetId", ""))
+	var target_name = str(action.get("targetName", target_id))
+
+	close_context_action_panel()
+
+	if action_key == "place_object":
+		var target_obj = _get_world_object_by_id(target_id) if target_kind == "object" else null
+		var obj_location = str(target_obj.get("location", player_node.current_location)) if target_obj != null else player_node.current_location
+		enqueue_player_action(
+			player_name, "interact",
+			("object:" + target_id) if target_kind == "object" else target_id,
+			obj_location,
+			player_node.position.x, player_node.position.y,
+			"Placing %s on %s" % [item_name, target_name],
+			"", 0.1, item_id, "action:place_object"
+		)
+		object_interaction_in_last_turn = true
+	elif action_key == "throw":
+		var target_obj = _get_world_object_by_id(target_id) if target_kind == "object" else null
+		var target_agent_id = ("object:" + target_id) if target_kind == "object" else target_id
+		var act_loc = player_node.current_location
+		if target_obj != null:
+			act_loc = str(target_obj.get("location", act_loc))
+		enqueue_player_action(
+			player_name, "interact",
+			target_agent_id, act_loc,
+			player_node.position.x, player_node.position.y,
+			"Throwing %s at %s" % [item_name, target_name],
+			"", 0.3, item_id, "action:throw"
+		)
+		object_interaction_in_last_turn = true
+	elif action_key == "drop":
+		# Drop action: item already carried, just place at player's feet
+		enqueue_player_action(
+			player_name, "interact",
+			"object:" + item_id, player_node.current_location,
+			player_node.position.x, player_node.position.y,
+			"Dropping " + item_name,
+			"", 0.1, item_id, "action:drop"
+		)
+		object_interaction_in_last_turn = true
+
 func _on_context_action_selected(action: Dictionary) -> void:
 	if player_node == null:
 		return
@@ -2484,6 +2698,11 @@ func _on_context_action_selected(action: Dictionary) -> void:
 
 	var action_key = flair.trim_prefix("action:")
 	var target_name = str(action.get("targetName", target_id))
+
+	# Place / Throw / Drop → open inventory picker to choose which item.
+	if action_key == "place_object" or action.get("needsInventoryPick", false) or action_key == "throw":
+		_open_inventory_picker(action)
+		return
 
 	# Inspect / observe → local examine panel, no server round-trip.
 	if action_key == "inspect" or action_key == "observe":
@@ -3471,6 +3690,27 @@ func _on_turn_processed(result, response_code, headers, body, http):
 				var inv_ids = player_state.get("inventory", [])
 				if inv_ids is Array:
 					player_node.inventory = inv_ids.duplicate()
+
+		# Apply knocked-back agent position immediately from the action result.
+		# update_from_backend only sets position on first spawn, so we set it directly.
+		var target_agent_state = action_result.get("targetAgentState", null)
+		if target_agent_state is Dictionary and target_agent_state.has("name") \
+				and target_agent_state.has("x") and target_agent_state.has("y"):
+			var tname = str(target_agent_state.get("name", ""))
+			if tname != "" and agent_nodes.has(tname):
+				var knocked_node = agent_nodes[tname]
+				if is_instance_valid(knocked_node):
+					var new_pos = snap_to_tile(Vector2(
+						float(target_agent_state.get("x", 0.0)),
+						float(target_agent_state.get("y", 0.0))
+					))
+					knocked_node.position = new_pos
+					entity_anchors[tname] = new_pos
+					agent_positions[tname] = {
+						"location": str(target_agent_state.get("location", agent_positions.get(tname, {}).get("location", ""))),
+						"x": new_pos.x,
+						"y": new_pos.y
+					}
 
 		if action_result.get("success", false):
 			if action_result.has("agentReplyText") and str(action_result.get("agentReplyText", "")) != "":
