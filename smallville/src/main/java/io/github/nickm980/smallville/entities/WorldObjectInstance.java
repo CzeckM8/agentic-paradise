@@ -98,7 +98,9 @@ public class WorldObjectInstance {
     public Map<String, Object> toMap() {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("instanceId", instanceId);
+        result.put("id", instanceId);       // backward-compat for Godot client
         result.put("typeId", typeId);
+        result.put("type", typeId);         // backward-compat for Godot client
         result.put("name", name);
         result.put("x", x);
         result.put("y", y);

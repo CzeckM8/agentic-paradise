@@ -239,28 +239,6 @@ public class SimulationService {
 		private String lastError;
 	}
 
-	private static class WorldObjectInstance {
-		private String id;
-		private String type;
-		private String name;
-		private double x;
-		private double y;
-		private String location;
-		private Map<String, Object> properties = new HashMap<>();
-
-		private Map<String, Object> toMap() {
-			Map<String, Object> result = new LinkedHashMap<>();
-			result.put("id", id);
-			result.put("type", type);
-			result.put("name", name);
-			result.put("x", x);
-			result.put("y", y);
-			result.put("location", location);
-			result.put("properties", properties);
-			return result;
-		}
-	}
-
     public SimulationService(LLM llm, World world) {
 	this.world = world;
 	this.mapper = new ModelMapper();
@@ -296,6 +274,7 @@ public class SimulationService {
 
 	if (observation.isReactable()) {
 	    SimulationTime.update();
+	    injectLegalActions(agent);
 	    prompts.react(agent, observation.getDescription());
 	}
     }
@@ -353,15 +332,15 @@ public class SimulationService {
 		}
 		Map<String, Object> response = new LinkedHashMap<>();
 		response.put("kind", "object");
-		response.put("id", instance.id);
-		response.put("name", instance.name);
-		response.put("location", instance.location);
-		response.put("x", instance.x);
-		response.put("y", instance.y);
-		response.put("tileX", toTile(instance.x));
-		response.put("tileY", toTile(instance.y));
-		if (instance.properties != null) {
-			Object heldBy = instance.properties.get("heldBy");
+		response.put("id", instance.getId());
+		response.put("name", instance.getName());
+		response.put("location", instance.getLocation());
+		response.put("x", instance.getX());
+		response.put("y", instance.getY());
+		response.put("tileX", toTile(instance.getX()));
+		response.put("tileY", toTile(instance.getY()));
+		if (instance.getProperties() != null) {
+			Object heldBy = instance.getProperties().get("heldBy");
 			if (heldBy != null && !String.valueOf(heldBy).isBlank()) {
 				response.put("heldBy", String.valueOf(heldBy));
 			}
@@ -418,10 +397,10 @@ public class SimulationService {
 			if (object == null || isObjectHeld(object)) {
 				continue;
 			}
-			String tile = "(" + toTile(object.x) + "," + toTile(object.y) + ")";
-			String location = object.location == null ? "unknown" : object.location;
-			objectsView.add(object.id + "@" + tile + "[" + location + "]");
-			if (!asBoolean(object.properties == null ? null : object.properties.get("walkable"), true)) {
+			String tile = "(" + toTile(object.getX()) + "," + toTile(object.getY()) + ")";
+			String location = object.getLocation() == null ? "unknown" : object.getLocation();
+			objectsView.add(object.getId() + "@" + tile + "[" + location + "]");
+			if (!asBoolean(object.getProperties() == null ? null : object.getProperties().get("walkable"), true)) {
 				blockedTiles.add(tile);
 			}
 		}
@@ -863,9 +842,9 @@ public class SimulationService {
 				&& request.getFlair().toLowerCase().contains("action:climb");
 			if (blockingObject != null) {
 				if (isClimbMove && isObjectClimbable(blockingObject)) {
-					player.setCurrentActivity("Climbing onto " + blockingObject.name);
+					player.setCurrentActivity("Climbing onto " + blockingObject.getName());
 				} else {
-					throw new SmallvilleException("Target tile is blocked by " + blockingObject.name);
+					throw new SmallvilleException("Target tile is blocked by " + blockingObject.getName());
 				}
 			}
 
@@ -885,14 +864,14 @@ public class SimulationService {
 			if (toDrop != null && isObjectInInventory(player, objId)) {
 				LinkedHashSet<String> inv = getInventorySet(player);
 				inv.remove(objId);
-				if (toDrop.properties == null) toDrop.properties = new HashMap<>();
-				toDrop.properties.remove("heldBy");
-				toDrop.x = snapToTile(player.getX());
-				toDrop.y = snapToTile(player.getY());
-				toDrop.location = player.getLocation() != null ? player.getLocation().getFullPath() : null;
+				if (toDrop.getProperties() == null) toDrop.setProperties(new HashMap<>());
+				toDrop.getProperties().remove("heldBy");
+				toDrop.setX(snapToTile(player.getX()));
+				toDrop.setY(snapToTile(player.getY()));
+				toDrop.setLocation(player.getLocation() != null ? player.getLocation().getFullPath() : null);
 				refreshAgentCarriedItems(player);
-				recordCommittedAction(player, "DROP", toDrop.id + " at (" + toDrop.x + "," + toDrop.y + ")");
-				res.setResult("Dropped " + toDrop.name);
+				recordCommittedAction(player, "DROP", toDrop.getId() + " at (" + toDrop.getX() + "," + toDrop.getY() + ")");
+				res.setResult("Dropped " + toDrop.getName());
 			} else {
 				res.setResult("Nothing to drop");
 			}
@@ -919,9 +898,9 @@ public class SimulationService {
 					throw new SmallvilleException(objectFeasibilityError);
 				}
 
-				int objectDistance = tileManhattanDistance(player.getX(), player.getY(), objectTarget.x, objectTarget.y);
+				int objectDistance = tileManhattanDistance(player.getX(), player.getY(), objectTarget.getX(), objectTarget.getY());
 				String verbDescription = request.getActionDescription() == null || request.getActionDescription().isBlank()
-					? "Interacting with " + objectTarget.name
+					? "Interacting with " + objectTarget.getName()
 					: request.getActionDescription();
 				String normalizedVerb = verbDescription.toLowerCase();
 				String normalizedFlair = request.getFlair() == null ? "" : request.getFlair().toLowerCase();
@@ -936,28 +915,28 @@ public class SimulationService {
 
 				// Lock / unlock (new vocabulary)
 				if (normalizedFlair.contains("action:unlock") || (normalizedVerb.contains("unlock") && !normalizedVerb.contains("lock"))) {
-					objectTarget.properties.put("locked", false);
-					objectTarget.properties.put("passable", true);
-					verbDescription = "Unlocked " + objectTarget.name;
+					objectTarget.getProperties().put("locked", false);
+					objectTarget.getProperties().put("passable", true);
+					verbDescription = "Unlocked " + objectTarget.getName();
 				} else if (normalizedFlair.contains("action:lock") || (normalizedVerb.startsWith("lock") || normalizedVerb.contains(" lock"))) {
-					objectTarget.properties.put("locked", true);
-					objectTarget.properties.put("passable", false);
-					verbDescription = "Locked " + objectTarget.name;
-				} else if ("entrance_anchor".equalsIgnoreCase(objectTarget.type)
-					|| asBoolean(objectTarget.properties.get("transition_point"), false)
-					|| containsTag(objectTarget.properties, "entrance")
-					|| containsTag(objectTarget.properties, "door")) {
+					objectTarget.getProperties().put("locked", true);
+					objectTarget.getProperties().put("passable", false);
+					verbDescription = "Locked " + objectTarget.getName();
+				} else if ("entrance_anchor".equalsIgnoreCase(objectTarget.getType())
+					|| asBoolean(objectTarget.getProperties().get("transition_point"), false)
+					|| containsTag(objectTarget.getProperties(), "entrance")
+					|| containsTag(objectTarget.getProperties(), "door")) {
 					// Legacy open/close — kept for backward compat, writes both old and new props
 					if (normalizedVerb.contains("close")) {
-						objectTarget.properties.put("locked", true);
-						objectTarget.properties.put("passable", false);
-						objectTarget.properties.put("doorOpen", false);
-						verbDescription = "Closed " + objectTarget.name;
+						objectTarget.getProperties().put("locked", true);
+						objectTarget.getProperties().put("passable", false);
+						objectTarget.getProperties().put("doorOpen", false);
+						verbDescription = "Closed " + objectTarget.getName();
 					} else if (normalizedVerb.contains("open")) {
-						objectTarget.properties.put("locked", false);
-						objectTarget.properties.put("passable", true);
-						objectTarget.properties.put("doorOpen", true);
-						verbDescription = "Opened " + objectTarget.name;
+						objectTarget.getProperties().put("locked", false);
+						objectTarget.getProperties().put("passable", true);
+						objectTarget.getProperties().put("doorOpen", true);
+						verbDescription = "Opened " + objectTarget.getName();
 					}
 				}
 				// Write — store player-supplied text in the object's has_writing property
@@ -966,33 +945,33 @@ public class SimulationService {
 					if (textToWrite != null && !textToWrite.isBlank()) {
 						String sanitized = textToWrite.trim();
 						if (sanitized.length() > 280) sanitized = sanitized.substring(0, 280);
-						if (objectTarget.properties == null) objectTarget.properties = new HashMap<>();
-						objectTarget.properties.put("has_writing", sanitized);
-						verbDescription = "Wrote on " + objectTarget.name + ": \"" + sanitized + "\"";
+						if (objectTarget.getProperties() == null) objectTarget.setProperties(new HashMap<>());
+						objectTarget.getProperties().put("has_writing", sanitized);
+						verbDescription = "Wrote on " + objectTarget.getName() + ": \"" + sanitized + "\"";
 					} else {
-						verbDescription = "Writing on " + objectTarget.name + " (no text supplied)";
+						verbDescription = "Writing on " + objectTarget.getName() + " (no text supplied)";
 					}
 				}
 
 				// Read — surface stored writing, no further processing needed
 				if (normalizedFlair.contains("action:read") || normalizedVerb.startsWith("read")) {
-					Object writingObj = objectTarget.properties.get("has_writing");
+					Object writingObj = objectTarget.getProperties().get("has_writing");
 					String writing = writingObj != null ? writingObj.toString() : null;
 					res.setResult(writing != null && !writing.isBlank()
 						? "Read: " + writing
-						: objectTarget.name + " has nothing written on it.");
+						: objectTarget.getName() + " has nothing written on it.");
 					res.setPlayerState(fromAgentWithInventory(player));
 					return res;
 				}
 
 				if (normalizedVerb.contains("carry") || normalizedVerb.contains("steal") || normalizedFlair.contains("action:carry")) {
 					addObjectToInventory(player, objectTarget);
-					verbDescription = "Picked up " + objectTarget.name;
+					verbDescription = "Picked up " + objectTarget.getName();
 				}
 				if (normalizedVerb.contains("place object") || normalizedFlair.contains("action:place_object")) {
 					WorldObjectInstance placed = placeFirstInventoryObjectAt(player, objectTarget);
 					if (placed != null) {
-						verbDescription = "Placed " + placed.name + " near " + objectTarget.name;
+						verbDescription = "Placed " + placed.getName() + " near " + objectTarget.getName();
 					}
 				}
 
@@ -1010,22 +989,22 @@ public class SimulationService {
 					stressDelta = -0.02;  // calm activities
 				}
 				player.applyStressChange(stressDelta);
-				recordCommittedAction(player, "INTERACT_OBJECT", objectTarget.id + " | " + verbDescription);
+				recordCommittedAction(player, "INTERACT_OBJECT", objectTarget.getId() + " | " + verbDescription);
 
 				for (Agent bystander : world.getAgents()) {
 					if (bystander.getFullName().equals(player.getFullName())) {
 						continue;
 					}
-					if (bystander.getLocation() != null && objectTarget.location != null
-						&& objectTarget.location.equals(bystander.getLocation().getFullPath())
-						&& tileManhattanDistance(bystander.getX(), bystander.getY(), objectTarget.x, objectTarget.y) <= OBJECT_WITNESS_TILE_DISTANCE) {
+					if (bystander.getLocation() != null && objectTarget.getLocation() != null
+						&& objectTarget.getLocation().equals(bystander.getLocation().getFullPath())
+						&& tileManhattanDistance(bystander.getX(), bystander.getY(), objectTarget.getX(), objectTarget.getY()) <= OBJECT_WITNESS_TILE_DISTANCE) {
 						enqueueReactiveEvent(bystander.getFullName(), "noticed player " + verbDescription.toLowerCase(), 3, true);
 					}
 				}
 
 				res.setPlayerState(fromAgentWithInventory(player));
 				res.setStressChange(stressDelta);
-				res.setResult("Interacted with " + objectTarget.name);
+				res.setResult("Interacted with " + objectTarget.getName());
 				return res;
 			}
 
@@ -1330,20 +1309,20 @@ public class SimulationService {
 	}
 
 	WorldObjectInstance instance = objectInstances.getOrDefault(objectId, new WorldObjectInstance());
-	instance.id = objectId;
-	instance.type = request.getType();
-	instance.name = request.getName() == null || request.getName().isBlank() ? objectId : request.getName();
-	instance.x = request.getX();
-	instance.y = request.getY();
+	instance.setId(objectId);
+	instance.setType(request.getType());
+	instance.setName(request.getName() == null || request.getName().isBlank() ? objectId : request.getName());
+	instance.setX(request.getX());
+	instance.setY(request.getY());
 	Location location = findLocationAt(request.getX(), request.getY());
-	instance.location = request.getLocation() != null ? request.getLocation() : (location == null ? null : location.getFullPath());
+	instance.setLocation(request.getLocation() != null ? request.getLocation() : (location == null ? null : location.getFullPath()));
 
 	Map<String, Object> merged = new HashMap<>();
-	merged.putAll(objectTypeDefinitions.getOrDefault(instance.type, new HashMap<>()));
+	merged.putAll(objectTypeDefinitions.getOrDefault(instance.getType(), new HashMap<>()));
 	if (request.getProperties() != null) {
 	    merged.putAll(request.getProperties());
 	}
-	instance.properties = merged;
+	instance.setProperties(merged);
 
 	objectInstances.put(objectId, instance);
 
@@ -1367,7 +1346,7 @@ public class SimulationService {
 	    throw new SmallvilleException("Unknown object id: " + objectId);
 	}
 	if (patch != null) {
-	    instance.properties.putAll(patch);
+	    instance.getProperties().putAll(patch);
 	}
 	return instance.toMap();
     }
@@ -1435,8 +1414,8 @@ public class SimulationService {
 	    if (isObjectHeld(instance)) {
 		continue;
 	    }
-	    boolean sameLocation = locationName != null && locationName.equals(instance.location);
-	    boolean sameTile = toTile(instance.x) == tileX && toTile(instance.y) == tileY;
+	    boolean sameLocation = locationName != null && locationName.equals(instance.getLocation());
+	    boolean sameTile = toTile(instance.getX()) == tileX && toTile(instance.getY()) == tileY;
 	    if (sameLocation && sameTile) {
 		Map<String, Object> item = new LinkedHashMap<>();
 		item.put("kind", "object");
@@ -1486,14 +1465,14 @@ public class SimulationService {
 			if (isObjectHeld(obj)) {
 				continue;
 			}
-			if (obj.location == null || locationPath == null) {
+			if (obj.getLocation() == null || locationPath == null) {
 				continue;
 			}
-			if (!locationPath.equals(obj.location)) {
+			if (!locationPath.equals(obj.getLocation())) {
 				continue;
 			}
-			int objectDistance = tileManhattanDistance(obj.x, obj.y, playerX, playerY);
-			int interactionRadiusTiles = Math.max(1, toTileDistance(asDouble(obj.properties == null ? null : obj.properties.get("interactionRadius"), TILE_SIZE)));
+			int objectDistance = tileManhattanDistance(obj.getX(), obj.getY(), playerX, playerY);
+			int interactionRadiusTiles = Math.max(1, toTileDistance(asDouble(obj.getProperties() == null ? null : obj.getProperties().get("interactionRadius"), TILE_SIZE)));
 			if (objectDistance > Math.min(safeRadiusTiles, interactionRadiusTiles + 1)) {
 				continue;
 			}
@@ -1547,7 +1526,7 @@ public class SimulationService {
 				if (obj == null) {
 					continue;
 				}
-				int distance = tileManhattanDistance(obj.x, obj.y, player.getX(), player.getY());
+				int distance = tileManhattanDistance(obj.getX(), obj.getY(), player.getX(), player.getY());
 				actions.addAll(buildObjectAffordanceActions(obj, distance, player));
 			}
 		}
@@ -1608,44 +1587,44 @@ public class SimulationService {
 		if (isObjectHeld(object)) {
 			return actions;
 		}
-		Map<String, Object> properties = object.properties == null ? new HashMap<>() : object.properties;
+		Map<String, Object> properties = object.getProperties() == null ? new HashMap<>() : object.getProperties();
 		boolean interactive = asBoolean(properties.get("interactive"), true);
 		if (!interactive) {
 			return actions;
 		}
 
 		actions.add(buildObjectAffordanceAction("Inspect", object, distance,
-			"Inspecting " + object.name, "observant"));
+			"Inspecting " + object.getName(), "observant"));
 
 		// Write: any interactive object is writable if actor has a writing tool,
 		// unless explicitly marked hard_to_write_on.
 		boolean hardToWrite = asBoolean(properties.get("hard_to_write_on"), false);
 		if (!hardToWrite && actorHasGrant(actor, "writing_utensil")) {
 			actions.add(buildObjectAffordanceAction("Write On", object, distance,
-				"Writing on " + object.name, "action:write"));
+				"Writing on " + object.getName(), "action:write"));
 		}
 		if (asBoolean(properties.get("flat_surface"), false) && !getInventorySet(actor).isEmpty()) {
 			actions.add(buildObjectAffordanceAction("Place Object", object, distance,
-				"Placing object on " + object.name, "action:place_object"));
+				"Placing object on " + object.getName(), "action:place_object"));
 		}
 		if (asBoolean(properties.get("stealable"), false)) {
 			actions.add(buildObjectAffordanceAction("Steal", object, distance,
-				"Stealing from " + object.name, "sneaky"));
+				"Stealing from " + object.getName(), "sneaky"));
 		}
 		if (asBoolean(properties.get("carriable"), false)
 			&& !asBoolean(properties.get("rooted"), false)
 			&& !asBoolean(properties.get("uncarriable"), false)
-			&& !isObjectInInventory(actor, object.id)) {
+			&& !isObjectInInventory(actor, object.getId())) {
 			actions.add(buildObjectAffordanceAction("Carry", object, distance,
-				"Carrying " + object.name, "action:carry"));
+				"Carrying " + object.getName(), "action:carry"));
 		}
 		if (asBoolean(properties.get("sitAround"), false) || asBoolean(properties.get("sit-able"), false)) {
 			actions.add(buildObjectAffordanceAction("Sit", object, distance,
-				"Sitting by " + object.name, "calm"));
+				"Sitting by " + object.getName(), "calm"));
 		}
 		if (asBoolean(properties.get("performable"), false)) {
 			actions.add(buildObjectAffordanceAction("Perform", object, distance,
-				"Performing near " + object.name, "expressive"));
+				"Performing near " + object.getName(), "expressive"));
 		}
 
 		boolean isDoorLike = asBoolean(properties.get("can_open_close"), false)
@@ -1657,14 +1636,14 @@ public class SimulationService {
 			boolean locked = asBoolean(properties.get("locked"), false);
 			if (open) {
 				actions.add(buildObjectAffordanceAction("Close Door", object, distance,
-					"Closing door at " + object.name, "close door"));
+					"Closing door at " + object.getName(), "close door"));
 			} else if (!locked) {
 				actions.add(buildObjectAffordanceAction("Open Door", object, distance,
-					"Opening door at " + object.name, "open door"));
+					"Opening door at " + object.getName(), "open door"));
 			} else if (locked && actorHasGrant(actor, "key")) {
 				// Only offer unlock if actor has a key item
 				actions.add(buildObjectAffordanceAction("Unlock Door", object, distance,
-					"Unlocking door at " + object.name, "unlock"));
+					"Unlocking door at " + object.getName(), "unlock"));
 			}
 		}
 
@@ -1677,7 +1656,7 @@ public class SimulationService {
 				}
 				String title = actionVerb.substring(0, 1).toUpperCase() + actionVerb.substring(1);
 				actions.add(buildObjectAffordanceAction(title, object, distance,
-					actionVerb + " at " + object.name, "task"));
+					actionVerb + " at " + object.getName(), "task"));
 			}
 		}
 
@@ -1687,16 +1666,16 @@ public class SimulationService {
 	private Map<String, Object> buildObjectAffordanceAction(String label, WorldObjectInstance object, double distance,
 		String description, String flair) {
 		Map<String, Object> action = new LinkedHashMap<>();
-		action.put("label", label + " " + object.name);
+		action.put("label", label + " " + object.getName());
 		action.put("actionType", "interact");
 		action.put("targetKind", "object");
-		action.put("targetId", object.id);
-		action.put("targetName", object.name);
+		action.put("targetId", object.getId());
+		action.put("targetName", object.getName());
 		action.put("distance", distance);
 		action.put("hint", description);
 
 		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("targetAgent", "object:" + object.id);
+		payload.put("targetAgent", "object:" + object.getId());
 		payload.put("actionDescription", description);
 		payload.put("flair", flair);
 		action.put("payload", payload);
@@ -1833,6 +1812,7 @@ public class SimulationService {
 	    boolean dayStart = request.isForceDayStart() || state.lastRoutineDate == null || !state.lastRoutineDate.equals(nowDate);
 	    if (dayStart && !agent.hasPendingActions()) {
 		try {
+		    injectLegalActions(agent);
 		    prompts.refreshAgentForNewDay(agent);
 		    state.lastRoutineDate = nowDate;
 		    state.lastLlmCallAt = SimulationTime.now();
@@ -1850,6 +1830,7 @@ public class SimulationService {
 		    boolean shouldLlmReact = shouldTriggerLlmReaction(event, isAware);
 		    if (shouldLlmReact) {
 			try {
+			    injectLegalActions(agent);
 			    prompts.react(agent, event.description);
 			    state.lastLlmCallAt = SimulationTime.now();
 			    reacted.add(agent.getFullName());
@@ -2171,18 +2152,18 @@ public class SimulationService {
 			if (object == null || isObjectHeld(object)) {
 				continue;
 			}
-			int dist = tileManhattanDistance(agent.getX(), agent.getY(), object.x, object.y);
+			int dist = tileManhattanDistance(agent.getX(), agent.getY(), object.getX(), object.getY());
 			if (dist > AGENTIC_SOCIAL_AWARENESS_TILE_DISTANCE) {
 				continue;
 			}
-			if (!hasLineOfSight(agent.getX(), agent.getY(), object.x, object.y)) continue;
+			if (!hasLineOfSight(agent.getX(), agent.getY(), object.getX(), object.getY())) continue;
 			PerceptionEntry entry = new PerceptionEntry();
-			entry.entityId = object.id;
+			entry.entityId = object.getId();
 			entry.entityType = "object";
-			entry.x = object.x;
-			entry.y = object.y;
+			entry.x = object.getX();
+			entry.y = object.getY();
 			entry.distance = dist;
-			entry.locationPath = object.location;
+			entry.locationPath = object.getLocation();
 			entry.isMobile = false;
 			snapshot.visible.add(entry);
 			rememberPerceptionEntry(runtimeState, entry, now);
@@ -2379,12 +2360,12 @@ public class SimulationService {
 				candidate.actionType = String.valueOf(action.getOrDefault("actionType", "interact"));
 				candidate.actionDescription = String.valueOf(payload.getOrDefault("actionDescription", action.getOrDefault("hint", "Interacting")));
 				candidate.actionFlair = String.valueOf(payload.getOrDefault("flair", ""));
-				candidate.targetId = object.id;
+				candidate.targetId = object.getId();
 				candidate.targetType = "object";
 				candidate.targetIsMobile = false;
-				candidate.targetX = object.x;
-				candidate.targetY = object.y;
-				candidate.targetLocation = object.location;
+				candidate.targetX = object.getX();
+				candidate.targetY = object.getY();
+				candidate.targetLocation = object.getLocation();
 				candidate.reason = "affordance from perceived tools";
 				candidate.score = scoreObjectToolAction(actor, entry, candidate, memoryPenalty);
 				candidates.add(candidate);
@@ -2602,64 +2583,64 @@ public class SimulationService {
 
 			String lower = actionDesc.toLowerCase();
 			if (flair.contains("action:unlock") || (lower.contains("unlock") && !lower.contains("lock"))) {
-				objectTarget.properties.put("locked", false);
-				objectTarget.properties.put("passable", true);
-				actionDesc = "unlocked " + objectTarget.name;
+				objectTarget.getProperties().put("locked", false);
+				objectTarget.getProperties().put("passable", true);
+				actionDesc = "unlocked " + objectTarget.getName();
 			} else if (flair.contains("action:lock") || lower.startsWith("lock") || lower.contains(" lock")) {
-				objectTarget.properties.put("locked", true);
-				objectTarget.properties.put("passable", false);
-				actionDesc = "locked " + objectTarget.name;
-			} else if ("entrance_anchor".equalsIgnoreCase(objectTarget.type)
-				|| asBoolean(objectTarget.properties.get("transition_point"), false)
-				|| containsTag(objectTarget.properties, "entrance")
-				|| containsTag(objectTarget.properties, "door")) {
+				objectTarget.getProperties().put("locked", true);
+				objectTarget.getProperties().put("passable", false);
+				actionDesc = "locked " + objectTarget.getName();
+			} else if ("entrance_anchor".equalsIgnoreCase(objectTarget.getType())
+				|| asBoolean(objectTarget.getProperties().get("transition_point"), false)
+				|| containsTag(objectTarget.getProperties(), "entrance")
+				|| containsTag(objectTarget.getProperties(), "door")) {
 				if (lower.contains("close")) {
-					objectTarget.properties.put("locked", true);
-					objectTarget.properties.put("passable", false);
-					objectTarget.properties.put("doorOpen", false);
-					actionDesc = "closed " + objectTarget.name;
+					objectTarget.getProperties().put("locked", true);
+					objectTarget.getProperties().put("passable", false);
+					objectTarget.getProperties().put("doorOpen", false);
+					actionDesc = "closed " + objectTarget.getName();
 				} else if (lower.contains("open")) {
-					objectTarget.properties.put("locked", false);
-					objectTarget.properties.put("passable", true);
-					objectTarget.properties.put("doorOpen", true);
-					actionDesc = "opened " + objectTarget.name;
+					objectTarget.getProperties().put("locked", false);
+					objectTarget.getProperties().put("passable", true);
+					objectTarget.getProperties().put("doorOpen", true);
+					actionDesc = "opened " + objectTarget.getName();
 				}
 			}
 
 			if (lower.contains("carry") || lower.contains("steal") || flair.contains("action:carry")) {
 				addObjectToInventory(agent, objectTarget);
-				actionDesc = "picked up " + objectTarget.name;
+				actionDesc = "picked up " + objectTarget.getName();
 			}
 			if (lower.contains("place object") || flair.contains("action:place_object")) {
 				WorldObjectInstance placed = placeFirstInventoryObjectAt(agent, objectTarget);
 				if (placed != null) {
-					actionDesc = "placed " + placed.name + " near " + objectTarget.name;
+					actionDesc = "placed " + placed.getName() + " near " + objectTarget.getName();
 				}
 			}
 
 			// Write — agent generates text via LLM and stores it on the object
 			if (flair.contains("action:write") || lower.startsWith("write") || lower.contains("writing on")) {
-				if (objectTarget.properties == null) objectTarget.properties = new HashMap<>();
+				if (objectTarget.getProperties() == null) objectTarget.setProperties(new HashMap<>());
 				String written = generateAgentWritingContent(agent, objectTarget);
-				objectTarget.properties.put("has_writing", written);
-				actionDesc = "wrote on " + objectTarget.name + ": \"" + written + "\"";
+				objectTarget.getProperties().put("has_writing", written);
+				actionDesc = "wrote on " + objectTarget.getName() + ": \"" + written + "\"";
 			}
 
 			// Study — calms agent and adds a memory observation
 			if (flair.contains("action:study") || lower.startsWith("stud")) {
 				agent.applyStressChange(-0.03);
-				agent.getMemoryStream().add(new Observation("Studied " + objectTarget.name));
-				actionDesc = "studied " + objectTarget.name;
+				agent.getMemoryStream().add(new Observation("Studied " + objectTarget.getName()));
+				actionDesc = "studied " + objectTarget.getName();
 			}
 
 			// Light — torch/illuminate action (cosmetic, small stress relief)
 			if (flair.contains("action:light") || lower.startsWith("illuminat") || lower.startsWith("light")) {
 				agent.applyStressChange(-0.01);
-				actionDesc = "lit " + objectTarget.name;
+				actionDesc = "lit " + objectTarget.getName();
 			}
 
 			agent.setCurrentActivity("agentic: " + actionDesc);
-			recordCommittedAction(agent, "TOOL_ACTION", objectTarget.id + " | " + actionDesc);
+			recordCommittedAction(agent, "TOOL_ACTION", objectTarget.getId() + " | " + actionDesc);
 			agent.getMemoryStream().add(new Observation("Executed action: " + actionDesc));
 			enterCooldown(state, now, "tool_action", 5);
 			return;
@@ -2685,7 +2666,7 @@ public class SimulationService {
 	/** Generates context-appropriate writing content for an agent writing on an object. */
 	private String generateAgentWritingContent(Agent agent, WorldObjectInstance target) {
 		try {
-			String contextPrompt = "You are " + agent.getFullName() + ". You are writing on " + target.name
+			String contextPrompt = "You are " + agent.getFullName() + ". You are writing on " + target.getName()
 				+ ". Based on your current activity (\"" + agent.getCurrentActivity() + "\") and personality, "
 				+ "write 1-2 concise sentences that fit what your character would write here. Be in-character.";
 			String written = prompts.ask(agent, contextPrompt);
@@ -4462,6 +4443,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 	    }
 	    if (agent.getMemoryStream().getPlans().isEmpty()) {
 		try {
+		    injectLegalActions(agent);
 		    prompts.updateAgent(agent);
 		    bootstrapped.add(agent.getFullName());
 		} catch (Exception e) {
@@ -4642,14 +4624,14 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		if (isObjectHeld(target)) {
 			return "Object is currently held in inventory";
 		}
-		if (initiator.getLocation() == null || target.location == null) {
+		if (initiator.getLocation() == null || target.getLocation() == null) {
 			return "Player or object has unknown location";
 		}
-		if (!initiator.getLocation().getFullPath().equals(target.location)) {
+		if (!initiator.getLocation().getFullPath().equals(target.getLocation())) {
 			return "Object is not in the same location";
 		}
-		int radiusTiles = Math.max(1, toTileDistance(asDouble(target.properties == null ? null : target.properties.get("interactionRadius"), TILE_SIZE)));
-		double distance = tileManhattanDistance(initiator.getX(), initiator.getY(), target.x, target.y);
+		int radiusTiles = Math.max(1, toTileDistance(asDouble(target.getProperties() == null ? null : target.getProperties().get("interactionRadius"), TILE_SIZE)));
+		double distance = tileManhattanDistance(initiator.getX(), initiator.getY(), target.getX(), target.getY());
 		if (distance > radiusTiles + 1) {
 			return "Object is too far away (distance: " + (int) distance + " tiles)";
 		}
@@ -4715,20 +4697,20 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			.map(id -> objectInstances.get(id))
 			.filter(obj -> obj != null)
 			.anyMatch(obj -> {
-				if (obj.properties != null && containsTag(obj.properties, grantLower)) {
+				if (obj.getProperties() != null && containsTag(obj.getProperties(), grantLower)) {
 					return true;
 				}
 				// Name fallback: "house key" contains "key", "pocket knife" contains "knife"
-				String nameLower = obj.name == null ? "" : obj.name.toLowerCase();
+				String nameLower = obj.getName() == null ? "" : obj.getName().toLowerCase();
 				return nameLower.contains(grantLower);
 			});
 	}
 
 	private boolean isObjectHeld(WorldObjectInstance instance) {
-		if (instance == null || instance.properties == null) {
+		if (instance == null || instance.getProperties() == null) {
 			return false;
 		}
-		Object holder = instance.properties.get("heldBy");
+		Object holder = instance.getProperties().get("heldBy");
 		return holder != null && !String.valueOf(holder).isBlank();
 	}
 
@@ -4737,14 +4719,14 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			return;
 		}
 		LinkedHashSet<String> inv = getInventorySet(actor);
-		inv.add(object.id);
-		if (object.properties == null) {
-			object.properties = new HashMap<>();
+		inv.add(object.getId());
+		if (object.getProperties() == null) {
+			object.setProperties(new HashMap<>());
 		}
-		object.properties.put("heldBy", actor.getFullName());
-		object.location = null;
-		object.x = actor.getX();
-		object.y = actor.getY();
+		object.getProperties().put("heldBy", actor.getFullName());
+		object.setLocation(null);
+		object.setX(actor.getX());
+		object.setY(actor.getY());
 		refreshAgentCarriedItems(actor);
 	}
 
@@ -4754,7 +4736,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		List<String> names = getInventorySet(actor).stream()
 			.map(id -> objectInstances.get(id))
 			.filter(obj -> obj != null)
-			.map(obj -> obj.name)
+			.map(obj -> obj.getName())
 			.collect(Collectors.toList());
 		actor.setCarriedItemNames(names);
 	}
@@ -4784,17 +4766,17 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			return null;
 		}
 
-		double placeX = anchorObject != null ? anchorObject.x : actor.getX();
-		double placeY = anchorObject != null ? anchorObject.y : actor.getY();
-		String placeLocation = anchorObject != null ? anchorObject.location : (actor.getLocation() == null ? null : actor.getLocation().getFullPath());
+		double placeX = anchorObject != null ? anchorObject.getX() : actor.getX();
+		double placeY = anchorObject != null ? anchorObject.getY() : actor.getY();
+		String placeLocation = anchorObject != null ? anchorObject.getLocation() : (actor.getLocation() == null ? null : actor.getLocation().getFullPath());
 
-		held.x = snapToTile(placeX);
-		held.y = snapToTile(placeY);
-		held.location = placeLocation;
-		if (held.properties == null) {
-			held.properties = new HashMap<>();
+		held.setX(snapToTile(placeX));
+		held.setY(snapToTile(placeY));
+		held.setLocation(placeLocation);
+		if (held.getProperties() == null) {
+			held.setProperties(new HashMap<>());
 		}
-		held.properties.remove("heldBy");
+		held.getProperties().remove("heldBy");
 		inv.remove(objectId);
 		refreshAgentCarriedItems(actor);
 		return held;
@@ -4816,14 +4798,14 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 
 		// Remove from inventory, place at target
 		inv.remove(resolvedItemId);
-		thrownItem.x = snapToTile(targetX);
-		thrownItem.y = snapToTile(targetY);
-		thrownItem.location = actor.getLocation() == null ? null : actor.getLocation().getFullPath();
-		if (thrownItem.properties == null) thrownItem.properties = new HashMap<>();
-		thrownItem.properties.remove("heldBy");
+		thrownItem.setX(snapToTile(targetX));
+		thrownItem.setY(snapToTile(targetY));
+		thrownItem.setLocation(actor.getLocation() == null ? null : actor.getLocation().getFullPath());
+		if (thrownItem.getProperties() == null) thrownItem.setProperties(new HashMap<>());
+		thrownItem.getProperties().remove("heldBy");
 		refreshAgentCarriedItems(actor);
 
-		String desc = "threw " + thrownItem.name;
+		String desc = "threw " + thrownItem.getName();
 
 		// Knockback: push entity 1 tile away from thrower
 		Agent targetEntity = targetEntityName != null && !targetEntityName.isBlank()
@@ -4831,7 +4813,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		if (targetEntity != null) {
 			applyKnockback(actor, targetEntity);
 			targetEntity.applyStressChange(0.07);
-			enqueueReactiveEvent(targetEntity.getFullName(), actor.getFullName() + " threw " + thrownItem.name + " and hit them", 7, true);
+			enqueueReactiveEvent(targetEntity.getFullName(), actor.getFullName() + " threw " + thrownItem.getName() + " and hit them", 7, true);
 			desc += " at " + targetEntity.getFullName();
 		}
 
@@ -4874,16 +4856,16 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		int tx = toTile(x);
 		int ty = toTile(y);
 		for (WorldObjectInstance obj : objectInstances.values()) {
-			if (obj == null || obj.location == null || obj.properties == null) {
+			if (obj == null || obj.getLocation() == null || obj.getProperties() == null) {
 				continue;
 			}
 			if (isObjectHeld(obj)) {
 				continue;
 			}
-			if (!location.getFullPath().equals(obj.location)) {
+			if (!location.getFullPath().equals(obj.getLocation())) {
 				continue;
 			}
-			if (toTile(obj.x) != tx || toTile(obj.y) != ty) {
+			if (toTile(obj.getX()) != tx || toTile(obj.getY()) != ty) {
 				continue;
 			}
 			if (isObjectBlockingMovement(obj)) {
@@ -4894,33 +4876,80 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 	}
 
 	private boolean isObjectClimbable(WorldObjectInstance obj) {
-		if (obj == null || obj.properties == null) return false;
-		if (!asBoolean(obj.properties.get("flat_surface"), false)) return false;
-		String height = String.valueOf(obj.properties.getOrDefault("height", "")).toLowerCase();
+		if (obj == null || obj.getProperties() == null) return false;
+		if (!asBoolean(obj.getProperties().get("flat_surface"), false)) return false;
+		String height = String.valueOf(obj.getProperties().getOrDefault("height", "")).toLowerCase();
 		return height.equals("low") || height.equals("medium") || height.equals("counter");
 	}
 
 	private boolean isObjectBlockingMovement(WorldObjectInstance obj) {
-		if (obj == null || obj.properties == null) return false;
+		if (obj == null || obj.getProperties() == null) return false;
 		// New vocabulary: passable: false = impassable solid
-		if (obj.properties.containsKey("passable")) {
-			boolean passable = asBoolean(obj.properties.get("passable"), true);
+		if (obj.getProperties().containsKey("passable")) {
+			boolean passable = asBoolean(obj.getProperties().get("passable"), true);
 			if (!passable) return true;
 		}
 		// transition_point (door/gate): blocked when locked
-		if (asBoolean(obj.properties.get("transition_point"), false)) {
-			return asBoolean(obj.properties.get("locked"), false);
+		if (asBoolean(obj.getProperties().get("transition_point"), false)) {
+			return asBoolean(obj.getProperties().get("locked"), false);
 		}
 		// Legacy: doorOpen / can_open_close / door tag
-		boolean doorLike = containsTag(obj.properties, "door")
-			|| containsTag(obj.properties, "entrance")
-			|| asBoolean(obj.properties.get("can_open_close"), false)
-			|| obj.properties.containsKey("doorOpen");
+		boolean doorLike = containsTag(obj.getProperties(), "door")
+			|| containsTag(obj.getProperties(), "entrance")
+			|| asBoolean(obj.getProperties().get("can_open_close"), false)
+			|| obj.getProperties().containsKey("doorOpen");
 		if (doorLike) {
-			return !asBoolean(obj.properties.get("doorOpen"), true);
+			return !asBoolean(obj.getProperties().get("doorOpen"), true);
 		}
 		// Legacy: walkable: false
-		return !asBoolean(obj.properties.get("walkable"), true);
+		return !asBoolean(obj.getProperties().get("walkable"), true);
+	}
+
+	// ── ActionResolver helpers ────────────────────────────────────────────────
+
+	/**
+	 * Build the per-actor typed-inventory map required by ActionResolver.
+	 * Uses each Agent's {@code inventory} field (Map&lt;String,InventoryItem&gt;)
+	 * which is the authoritative typed store maintained by SimulationService.
+	 */
+	private Map<String, Map<String, InventoryItem>> buildInventoryByActor() {
+		Map<String, Map<String, InventoryItem>> result = new HashMap<>();
+		for (Agent agent : world.getAgents()) {
+			result.put(agent.getFullName(), agent.getInventory());
+		}
+		return result;
+	}
+
+	/**
+	 * Compute legal actions for the given NPC using ActionResolver and store
+	 * them on the agent as a transient field so the LLM prompt builder can
+	 * include them via {@code {{agent.legalActions}}}.
+	 *
+	 * Must be called before any LLM planning call (updateAgent, react, etc.).
+	 */
+	private void injectLegalActions(Agent agent) {
+		if (agent == null) return;
+		try {
+			List<String> nearbyAgentIds = world.getAgents().stream()
+				.filter(a -> a != agent)
+				.filter(a -> {
+					double dx = a.getX() - agent.getX();
+					double dy = a.getY() - agent.getY();
+					return Math.sqrt(dx * dx + dy * dy) / TILE_SIZE <= AGENTIC_SOCIAL_AWARENESS_TILE_DISTANCE;
+				})
+				.map(Agent::getFullName)
+				.collect(Collectors.toList());
+
+			ActionResolver resolver = new ActionResolver(
+				buildInventoryByActor(), objectInstances, objectTypeDefinitions);
+			List<String> legal = resolver.legalActionsFor(
+				agent.getFullName(), agent.getX(), agent.getY(), nearbyAgentIds);
+			agent.setLegalActions(legal);
+			LOG.debug("[LegalActions] {} → {}", agent.getFullName(), legal);
+		} catch (Exception e) {
+			LOG.warn("[LegalActions] Failed to compute legal actions for {}: {}", agent.getFullName(), e.getMessage());
+			agent.setLegalActions(List.of("wait"));
+		}
 	}
 
 	/**
@@ -4939,8 +4968,8 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		for (WorldObjectInstance obj : objectInstances.values()) {
 			if (obj == null || isObjectHeld(obj)) continue;
 			if (!isObjectBlockingMovement(obj)) continue;
-			if (obj.properties != null && asBoolean(obj.properties.get("transparent"), false)) continue;
-			int bx = toTile(obj.x), by = toTile(obj.y);
+			if (obj.getProperties() != null && asBoolean(obj.getProperties().get("transparent"), false)) continue;
+			int bx = toTile(obj.getX()), by = toTile(obj.getY());
 			losSet.add(((long) bx << 32) | (by & 0xFFFFFFFFL));
 		}
 
