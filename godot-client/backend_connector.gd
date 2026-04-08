@@ -16,7 +16,6 @@ var initial_object_seed_enabled = true
 @onready var agents_container = get_node("../World/Agents")
 @onready var debug_label = get_node("../UI/DebugLabel")
 @onready var world_node = get_node("../World")
-@onready var world_camera = get_node("../World/Camera")
 @onready var dialogue_panel = get_node("../UI/DialoguePanel")
 @onready var dialogue_target_label = get_node("../UI/DialoguePanel/DialogueVBox/DialogueTargetLabel")
 @onready var dialogue_log = get_node("../UI/DialoguePanel/DialogueVBox/DialogueLog")
@@ -215,8 +214,18 @@ func _set_loading(visible: bool, message: String = ""):
 		if message != "" and loading_status_label != null:
 			loading_status_label.text = message
 
+func _apply_game_session_from_menu() -> void:
+	"""Apply name (and related session data) chosen in the main-menu flow."""
+	var session = get_node_or_null("/root/GameSession")
+	if session == null:
+		return
+	var n = str(session.player_name).strip_edges()
+	player_name = n if n != "" else "Player"
+	session.player_name = player_name
+
 func _ready():
 	print("Backend Connector initialized")
+	_apply_game_session_from_menu()
 	_refresh_debug_label()
 	_ensure_location_overlay_container()
 	_ensure_object_overlay_container()
@@ -378,7 +387,7 @@ func _initialize_new_world():
 	# Create the player character (await so bootstrap can lock input immediately after)
 	print("[INIT] Creating player character...")
 	await _create_player_async({
-		"name": "Player",
+		"name": player_name,
 		"location": "home",
 		"activity": "Looking around home",
 		"memories": ["I've arrived in this strange town.", "I should explore and meet the locals."]
@@ -810,17 +819,6 @@ func _get_default_object_type_definitions() -> Dictionary:
 			"interactionRadius": 40,
 			"tags": ["entrance", "pathing"]
 		},
-		# idle_zones are walkable floor markers
-		"idle_zone": {
-			"anchor": true,
-			"anchorKind": "idle_zone",
-			"portable": false,
-			"interactive": true,
-			"passable": true,
-			"interactionMode": "nearby",
-			"interactionRadius": 96,
-			"tags": ["ambient", "social"]
-		},
 		# work_spots (counters, bars) are solid — you work adjacent, not on top
 		"work_spot": {
 			"anchor": true,
@@ -872,16 +870,11 @@ func _get_default_object_type_definitions() -> Dictionary:
 func _get_default_world_objects() -> Array:
 	return [
 		# Street pathing and transitions
-		{"id":"street_idle_north","type":"idle_zone","name":"North Sidewalk Flow","x":900,"y":180,"location":"street","properties":{"zoneRadius":120,"pathingHint":true}},
-		{"id":"street_idle_central","type":"idle_zone","name":"Central Street Flow","x":900,"y":540,"location":"street","properties":{"zoneRadius":140,"pathingHint":true}},
-		{"id":"street_idle_south","type":"idle_zone","name":"South Sidewalk Flow","x":900,"y":980,"location":"street","properties":{"zoneRadius":120,"pathingHint":true}},
-
 		# Market
 		{"id":"market_entry_street","type":"entrance_anchor","name":"Market Entrance","x":600,"y":260,"location":"market","properties":{"linkedHint":"street","building":"market","transition_point":true,"locked":false,"passable":true}},
 		{"id":"market_counter","type":"work_spot","name":"Produce Counter","x":460,"y":200,"location":"market","properties":{"activity":["sell","buy","trade"],"adjacentPreferred":true,"passable":false,"height":"counter","flat_surface":true}},
 		{"id":"market_crates","type":"fixture","name":"Crate Stack","x":250,"y":300,"location":"market","properties":{"inspectable":true,"passable":false,"height":"medium","description":"A stack of wooden crates, some dented at the corners."}},
 		{"id":"market_notice_wall","type":"decor","name":"Market Notice Wall","x":120,"y":120,"location":"market","properties":{"writable":true,"graffiti":true,"passable":true,"height":"tall","has_writing":"Today's produce: fresh apples, potatoes, dried herbs. Haggling welcome."}},
-		{"id":"market_idle_zone","type":"idle_zone","name":"Market Browsing Zone","x":320,"y":260,"location":"market","properties":{"zoneRadius":100}},
 
 		# Tavern
 		{"id":"tavern_entry_street","type":"entrance_anchor","name":"Tavern Entrance","x":700,"y":230,"location":"tavern","properties":{"linkedHint":"street","building":"tavern","transition_point":true,"locked":false,"passable":true}},
@@ -889,7 +882,6 @@ func _get_default_world_objects() -> Array:
 		{"id":"tavern_table_a","type":"fixture","name":"Round Table A","x":830,"y":300,"location":"tavern","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"comfort":"worn but sturdy"}},
 		{"id":"tavern_table_b","type":"fixture","name":"Round Table B","x":1030,"y":320,"location":"tavern","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"comfort":"a bit wobbly"}},
 		{"id":"tavern_wall_sign","type":"decor","name":"Tavern Wall Sign","x":1140,"y":80,"location":"tavern","properties":{"stealable":true,"writable":true,"passable":true,"height":"tall","has_writing":"The Rusty Flagon — Est. Year 12. No credit. No exceptions."}},
-		{"id":"tavern_idle_zone","type":"idle_zone","name":"Tavern Common Zone","x":920,"y":260,"location":"tavern","properties":{"zoneRadius":110}},
 
 		# Coffee shop
 		{"id":"coffee_entry_street","type":"entrance_anchor","name":"Coffee Shop Entrance","x":1300,"y":210,"location":"coffee_shop","properties":{"linkedHint":"street","building":"coffee_shop","transition_point":true,"locked":false,"passable":true}},
@@ -897,20 +889,17 @@ func _get_default_world_objects() -> Array:
 		{"id":"coffee_register","type":"work_spot","name":"Register","x":1580,"y":140,"location":"coffee_shop","properties":{"activity":["charge","serve"],"passable":false,"height":"counter","flat_surface":true}},
 		{"id":"coffee_table","type":"fixture","name":"Window Table","x":1440,"y":290,"location":"coffee_shop","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"comfort":"comfortable","description":"A small round table by the window, with two chairs."}},
 		{"id":"coffee_bulletin","type":"decor","name":"Community Bulletin Board","x":1335,"y":95,"location":"coffee_shop","properties":{"writable":true,"noteBoard":true,"passable":true,"height":"tall","has_writing":"Lost cat — answers to Biscuit. Reward offered. Also: open mic night Friday."}},
-		{"id":"coffee_idle_zone","type":"idle_zone","name":"Coffee Lounge Zone","x":1520,"y":250,"location":"coffee_shop","properties":{"zoneRadius":90}},
 
 		# Town square
 		{"id":"square_stage","type":"fixture","name":"Public Stage","x":620,"y":760,"location":"town_square","properties":{"performable":true,"passable":false,"height":"low","flat_surface":true,"climbable":true,"description":"A raised wooden platform, scuffed from many performances."}},
 		{"id":"square_fountain","type":"fixture","name":"Fountain","x":780,"y":860,"location":"town_square","properties":{"landmark":true,"passable":false,"height":"medium","description":"A stone fountain, still running. Coins glint at the bottom."}},
 		{"id":"square_notice","type":"decor","name":"Public Notice Wall","x":980,"y":720,"location":"town_square","properties":{"writable":true,"graffiti":true,"passable":true,"height":"tall","has_writing":"Town meeting postponed. Curfew reminder: gates close at dusk."}},
-		{"id":"square_idle_zone","type":"idle_zone","name":"Town Square Gathering","x":760,"y":900,"location":"town_square","properties":{"zoneRadius":140}},
 
 		# Home
 		{"id":"home_entry_street","type":"entrance_anchor","name":"Home Entrance","x":224,"y":620,"location":"home","properties":{"linkedHint":"street","building":"home","transition_point":true,"locked":false,"passable":true}},
 		{"id":"home_bed","type":"work_spot","name":"Bedside","x":170,"y":860,"location":"home","properties":{"activity":["rest","sleep"],"passable":false,"height":"low","flat_surface":true,"climbable":true,"sittable":true,"comfort":"soft","description":"A modest bed with rumpled sheets."}},
 		{"id":"home_kitchen","type":"work_spot","name":"Kitchen Counter","x":250,"y":720,"location":"home","properties":{"activity":["cook","clean"],"passable":false,"height":"counter","flat_surface":true}},
 		{"id":"home_picture","type":"decor","name":"Framed Picture","x":120,"y":680,"location":"home","properties":{"stealable":true,"passable":true,"height":"low","description":"A faded painting of a countryside scene."}},
-		{"id":"home_idle_zone","type":"idle_zone","name":"Home Living Area","x":220,"y":800,"location":"home","properties":{"zoneRadius":90}},
 
 		# Carriable world items — can be picked up and placed
 		{"id":"item_pencil_market","type":"decor","name":"Pencil","x":470,"y":200,"location":"market","properties":{"carriable":true,"passable":true,"height":"low","tags":["writing_utensil","pen"],"description":"A short wooden pencil, worn to a nub."}},
@@ -1263,19 +1252,17 @@ func _create_player(player_data):
 	# Delegate to the async version but don't await it.
 	_create_player_async(player_data)
 
-func _attach_world_camera_to_player(player_nd: Node2D) -> void:
-	"""Reparent World/Camera under the player so it moves with grid position automatically."""
-	if world_camera == null or not is_instance_valid(world_camera) or player_nd == null:
+func _activate_player_camera(player_nd: Node2D) -> void:
+	"""Camera lives on the player scene; enable it once the node exists."""
+	if player_nd == null:
 		return
-	if world_camera.get_parent() == player_nd:
-		return
-	world_camera.reparent(player_nd, false)
-	if world_camera.has_method("reset_smoothing"):
-		world_camera.reset_smoothing()
-	if world_camera is Camera2D:
-		(world_camera as Camera2D).enabled = true
-		if (world_camera as Camera2D).has_method("make_current"):
-			(world_camera as Camera2D).make_current()
+	var cam = player_nd.get_node_or_null("Camera")
+	if cam is Camera2D:
+		cam.enabled = true
+		if cam.has_method("make_current"):
+			cam.make_current()
+		if cam.has_method("reset_smoothing"):
+			cam.reset_smoothing()
 
 func _create_player_async(player_data) -> void:
 	"""Async POST request to create a player character. Awaitable.
@@ -1289,9 +1276,9 @@ func _create_player_async(player_data) -> void:
 		player_node_instance.name = "Player"
 		agents_container.add_child(player_node_instance)
 		player_node = player_node_instance
+		player_node_instance.player_name = str(player_data.get("name", player_name))
 		print("Spawned player node: ", player_node_instance.name)
-		# Keep the view centered on the player: Camera2D follows as a child (avoids canvas/local space bugs).
-		_attach_world_camera_to_player(player_node_instance)
+		_activate_player_camera(player_node_instance)
 		# Small delay to let _ready() run on the new node
 		await get_tree().create_timer(0.1).timeout
 
@@ -1683,7 +1670,7 @@ func _show_object_summary_async(focus_world: Vector2) -> void:
 		if props is Dictionary and not bool(props.get("walkable", true)) and not bool(props.get("interactive", true)):
 			continue  # pure wall, skip
 		var ttype = str(t.get("type", ""))
-		if ttype == "wall" or ttype == "idle_zone":
+		if ttype == "wall":
 			continue
 		describable.append(t)
 
@@ -1781,7 +1768,7 @@ func _get_relational_context_for(skip_id: String, target: Dictionary) -> String:
 		if oid == skip_id or oid == "":
 			continue
 		var otype = str(obj.get("type", ""))
-		if otype == "wall" or otype == "entrance_anchor" or otype == "idle_zone":
+		if otype == "wall" or otype == "entrance_anchor":
 			continue
 		var opos = snap_to_tile(Vector2(float(obj.get("x", 0.0)), float(obj.get("y", 0.0))))
 		if world_to_tile(opos) == target_tile:
@@ -1981,7 +1968,7 @@ func _fetch_context_actions_async(player_id: String, player_position: Vector2, f
 			if not (t is Dictionary):
 				continue
 			var ttype = str(t.get("type", ""))
-			if ttype == "wall" or ttype == "idle_zone":
+			if ttype == "wall":
 				continue
 			var summary = _build_target_summary(t)
 			if summary != "":
@@ -4380,20 +4367,6 @@ func _redraw_object_overlays():
 		var color = _get_object_type_color(object_type)
 		var radius = _get_object_marker_radius(object_type)
 
-		if object_type == "idle_zone":
-			var zone_radius = radius
-			if properties is Dictionary and properties.has("zoneRadius"):
-				zone_radius = float(properties.get("zoneRadius", radius))
-			var zone = _make_circle_polygon(tile_center, zone_radius, color, 0.12)
-			object_overlays.add_child(zone)
-
-			var zone_border = Line2D.new()
-			zone_border.width = 2.0
-			zone_border.default_color = Color(color.r, color.g, color.b, 0.75)
-			zone_border.closed = true
-			zone_border.points = _make_circle_points(tile_center, zone_radius, 24)
-			object_overlays.add_child(zone_border)
-
 		var los_alpha = 1.0 if in_los else 0.15
 		var marker = _make_object_marker(object_type, tile_center, radius, color)
 		marker.modulate.a = los_alpha
@@ -4463,8 +4436,6 @@ func _get_object_type_color(object_type: String) -> Color:
 	match object_type:
 		"entrance_anchor":
 			return Color(1.00, 0.57, 0.12)
-		"idle_zone":
-			return Color(0.16, 0.72, 1.00)
 		"work_spot":
 			return Color(1.00, 0.86, 0.18)
 		"decor":
@@ -4478,8 +4449,6 @@ func _get_object_marker_radius(object_type: String) -> float:
 	match object_type:
 		"entrance_anchor":
 			return 10.0
-		"idle_zone":
-			return 14.0
 		"work_spot":
 			return 8.0
 		"decor":

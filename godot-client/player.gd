@@ -35,16 +35,12 @@ var speech_label: Label = null
 var _speech_timer: float = 0.0
 
 func _ready():
-	# Create a distinctive player sprite (larger than agents)
-	var texture = _create_player_texture()
-	if texture:
-		sprite.texture = texture
-		sprite.position = Vector2(16, 16)  # Draw in the center of the logical tile
-		sprite.visible = true
-		print("Player sprite created and visible")
-	else:
-		print("Failed to create player texture")
-	
+	_apply_player_sprite_texture()
+	sprite.centered = true
+	sprite.position = Vector2(16, 16)
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sprite.visible = true
+
 	label.position = Vector2(-34, -62)
 	label.add_theme_font_size_override("font_size", 14)
 	label.add_theme_color_override("font_color", Color(0.96, 0.42, 0.20, 1.0))
@@ -89,6 +85,7 @@ func _ready():
 	if backend_connector:
 		tile_step_size = backend_connector.get_tile_size()
 		position = backend_connector.snap_to_tile(position)
+	_scale_sprite_to_tile()
 	current_location = "town_square"
 	print("Player initialized at position: ", position, " in location: ", current_location)
 
@@ -488,25 +485,42 @@ func _update_appearance():
 		# High stress - red/agitated
 		sprite.modulate = Color.RED
 
-func _create_player_texture():
-	"""Create a distinctive player sprite at roughly agent size."""
+func _apply_player_sprite_texture() -> void:
+	"""Use avatar selected in GameSession, or fall back to a simple marker."""
+	var tex: Texture2D = null
+	var session = get_node_or_null("/root/GameSession")
+	if session != null and session.has_method("get_player_sprite_path"):
+		var path: String = session.get_player_sprite_path()
+		tex = load(path) as Texture2D
+	if tex == null:
+		tex = _create_player_texture_fallback()
+	sprite.texture = tex
+
+func _scale_sprite_to_tile() -> void:
+	"""Match sprite visual size to one grid tile (texture may be low-res pixel art)."""
+	if sprite.texture == null:
+		sprite.scale = Vector2.ONE
+		return
+	var d = maxf(float(sprite.texture.get_width()), float(sprite.texture.get_height()))
+	if d <= 0.0:
+		sprite.scale = Vector2.ONE
+		return
+	var s = tile_step_size / d
+	sprite.scale = Vector2(s, s)
+
+func _create_player_texture_fallback() -> Texture2D:
+	"""Procedural fallback if sprite assets fail to load."""
 	var img = Image.create(32, 32, false, Image.FORMAT_RGBA8)
-	
-	# Draw a circle in the center
 	var center = Vector2(16, 16)
 	var radius = 13
-	
 	for x in range(32):
 		for y in range(32):
 			var pixel_pos = Vector2(x, y)
 			var dist = pixel_pos.distance_to(center)
 			if dist <= radius:
-				# Filled circle
 				img.set_pixel(x, y, Color.DODGER_BLUE)
 			elif dist <= radius + 3:
-				# Border
 				img.set_pixel(x, y, Color.WHITE)
-	
 	return ImageTexture.create_from_image(img)
 
 func get_player_info() -> Dictionary:

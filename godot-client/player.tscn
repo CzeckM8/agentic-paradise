@@ -1,6 +1,7 @@
-[gd_scene load_steps=2 format=3 uid="uid://b1uaq6jcnjj1q"]
+[gd_scene load_steps=3 format=3 uid="uid://b1uaq6jcnjj1q"]
 
 [ext_resource type="Script" path="res://player.gd" id="1_lv5ox"]
+[ext_resource type="Script" path="res://camera.gd" id="2_cam"]
 
 [node name="Player" type="Node2D"]
 script = ExtResource("1_lv5ox")
@@ -13,3 +14,6 @@ offset_top = -50.0
 offset_right = 50.0
 offset_bottom = 50.0
 text = "Player"
+
+[node name="Camera" type="Camera2D" parent="."]
+script = ExtResource("2_cam")
