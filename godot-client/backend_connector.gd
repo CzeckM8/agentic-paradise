@@ -906,7 +906,7 @@ func _get_default_world_objects() -> Array:
 		{"id":"item_pencil_coffee","type":"decor","name":"Pencil","x":1345,"y":95,"location":"coffee_shop","properties":{"carriable":true,"passable":true,"height":"low","tags":["writing_utensil","pen"],"description":"A pencil left near the bulletin board."}},
 		{"id":"item_knife_tavern","type":"decor","name":"Pocket Knife","x":995,"y":145,"location":"tavern","properties":{"carriable":true,"passable":true,"height":"low","tags":["knife","blade","tool"],"description":"A folding knife with a worn wooden handle."}},
 		{"id":"item_coin_square","type":"decor","name":"Coin Purse","x":790,"y":870,"location":"town_square","properties":{"carriable":true,"passable":true,"height":"low","tags":["coins","currency","valuables"],"description":"A small leather coin purse, a few coins jingling inside."}},
-		{"id":"item_key_home","type":"decor","name":"House Key","x":240,"y":725,"location":"home","properties":{"carriable":true,"passable":true,"height":"low","tags":["key","unlock"],"description":"A brass door key on a simple ring."}},
+		{"id":"item_key_home","type":"decor","name":"House Key","x":240,"y":725,"location":"home","properties":{"carriable":true,"passable":true,"height":"low","tags":["key","unlock"],"opens":"home_entry_street","description":"A brass door key on a simple ring."}},
 
 		# ── Market extras ────────────────────────────────────────────────────────
 		{"id":"market_stall_b","type":"work_spot","name":"Dry Goods Stall","x":300,"y":200,"location":"market","properties":{"activity":["sell","buy","barter"],"passable":false,"height":"counter","flat_surface":true,"description":"A wooden stall piled with dried beans, grain sacks, and spices."}},
@@ -1997,7 +1997,19 @@ func _fetch_context_actions_async(player_id: String, player_position: Vector2, f
 	else:
 		targets = _collect_targets_near(player_position, 120.0)
 
-	var grouped_actions = _build_actions_grouped_by_target(targets)
+	# Primary: fetch server-authoritative action descriptors and build menu from them.
+	# Server computes affordances, range, key-lock binding, and carry-conflict in one pass.
+	# Fallback: if the server is unreachable or returns empty, build client-side as before.
+	var server_descriptors = await _fetch_player_legal_descriptors_async(player_id, player_position)
+	var grouped_actions: Array
+	if not server_descriptors.is_empty():
+		grouped_actions = _build_groups_from_server_descriptors(server_descriptors, player_position)
+	else:
+		grouped_actions = _build_actions_grouped_by_target(targets)
+		var server_legal = await _fetch_player_legal_actions_async(player_id, player_position)
+		if not server_legal.is_empty():
+			grouped_actions = _filter_grant_gated_actions(grouped_actions, server_legal)
+
 	context_actions_cache = grouped_actions
 	_render_grouped_context_actions(grouped_actions)
 
@@ -2018,6 +2030,150 @@ func _fetch_context_actions_async(player_id: String, player_position: Vector2, f
 		context_action_status.text = ""
 
 	context_actions_request_in_flight = false
+
+func _fetch_player_legal_actions_async(player_id: String, player_position: Vector2) -> Dictionary:
+	"""Query server for legal actions at the player's current position.
+	Returns a Dictionary keyed by 'verb:targetId' → true for fast lookup.
+	Returns empty Dictionary on failure (caller falls back to local computation)."""
+	var http = HTTPRequest.new()
+	add_child(http)
+	var px = int(player_position.x)
+	var py = int(player_position.y)
+	var url = "%s/player/%s/legal_actions?x=%d&y=%d" % [backend_url, player_id.uri_encode(), px, py]
+	var err = http.request(url)
+	if err != OK:
+		http.queue_free()
+		return {}
+	var response = await http.request_completed
+	http.queue_free()
+	if response[1] != 200:
+		return {}
+	var json = JSON.new()
+	if json.parse(response[3].get_string_from_utf8()) != OK:
+		return {}
+	var data = json.data
+	if not (data is Array):
+		return {}
+	var result: Dictionary = {}
+	for entry in data:
+		if entry is Dictionary:
+			var verb = str(entry.get("verb", ""))
+			var target_id = str(entry.get("targetId", ""))
+			if verb != "":
+				result[verb + ":" + target_id] = true
+	return result
+
+func _fetch_player_legal_descriptors_async(player_id: String, player_position: Vector2) -> Array:
+	"""Fetch full action descriptors [{verb, targetId, targetName, targetKind, label}] from server.
+	Returns empty Array on failure — caller falls back to client-side action building."""
+	var http = HTTPRequest.new()
+	add_child(http)
+	var px = int(player_position.x)
+	var py = int(player_position.y)
+	var url = "%s/player/%s/legal_actions?x=%d&y=%d" % [backend_url, player_id.uri_encode(), px, py]
+	var err = http.request(url)
+	if err != OK:
+		http.queue_free()
+		return []
+	var response = await http.request_completed
+	http.queue_free()
+	if response[1] != 200:
+		return []
+	var json = JSON.new()
+	if json.parse(response[3].get_string_from_utf8()) != OK:
+		return []
+	var data = json.data
+	if not (data is Array):
+		return []
+	return data
+
+func _build_groups_from_server_descriptors(descriptors: Array, player_position: Vector2) -> Array:
+	"""Convert server legalDescriptorsFor() response into the grouped_actions structure
+	expected by _render_grouped_context_actions(). Groups actions by targetId."""
+	var by_target: Dictionary = {}
+	var order: Array = []  # preserve insertion order for stable menu ordering
+
+	for desc in descriptors:
+		if not (desc is Dictionary): continue
+		var verb = str(desc.get("verb", ""))
+		var target_id = str(desc.get("targetId", ""))
+		var target_name = str(desc.get("targetName", target_id))
+		var target_kind = str(desc.get("targetKind", "object"))
+		var label = str(desc.get("label", verb.capitalize()))
+		if verb == "wait": continue  # wait is always available; skip cluttering the menu
+
+		var action_type = "interact"
+		if verb == "speak" or verb == "talk": action_type = "speak"
+		elif verb == "attack": action_type = "attack"
+
+		var target_agent = ("object:" + target_id) if target_kind == "object" else target_id
+		var action_desc_text = "%s %s" % [verb, target_name]
+		var action = {
+			"label": label,
+			"actionType": action_type,
+			"targetKind": target_kind,
+			"targetId": target_id,
+			"targetName": target_name,
+			"distance": 0.0,
+			"hint": action_desc_text,
+			"payload": {
+				"targetAgent": target_agent,
+				"actionDescription": action_desc_text,
+				"flair": "action:%s" % verb
+			}
+		}
+
+		var group_key = target_id if target_id != "" else verb
+		if not by_target.has(group_key):
+			by_target[group_key] = {
+				"targetKind": target_kind,
+				"targetId": target_id,
+				"targetName": target_name,
+				"distance": 0.0,
+				"actions": []
+			}
+			order.append(group_key)
+		by_target[group_key]["actions"].append(action)
+
+	var result: Array = []
+	for key in order:
+		result.append(by_target[key])
+	return result
+
+func _filter_grant_gated_actions(groups: Array, server_legal: Dictionary) -> Array:
+	"""Remove grant-gated actions (unlock, lock, write, carry) that the server did not permit.
+	Non-grant-gated actions (inspect, talk, sit, climb, etc.) are kept as-is."""
+	const GRANT_GATED := ["unlock", "lock", "write", "carry"]
+	var filtered: Array = []
+	for group in groups:
+		if not (group is Dictionary):
+			filtered.append(group)
+			continue
+		var kind = str(group.get("targetKind", ""))
+		var target_id = str(group.get("targetId", ""))
+		var actions: Array = group.get("actions", [])
+		var kept: Array = []
+		for action in actions:
+			if not (action is Dictionary):
+				kept.append(action)
+				continue
+			var payload = action.get("payload", {})
+			var flair = str(payload.get("flair", ""))
+			# Extract action key from flair "action:verb"
+			var action_key = ""
+			if flair.begins_with("action:"):
+				action_key = flair.substr(7)
+			if action_key in GRANT_GATED:
+				# Only keep if server confirmed this verb+targetId is legal
+				var server_key = action_key + ":" + target_id
+				if not server_legal.has(server_key):
+					continue
+			kept.append(action)
+		if not kept.is_empty():
+			var g = group.duplicate(true)
+			g["actions"] = kept
+			filtered.append(g)
+	return filtered
 
 func _is_object_held(row: Dictionary) -> bool:
 	"""True when this world object is currently in someone's inventory."""

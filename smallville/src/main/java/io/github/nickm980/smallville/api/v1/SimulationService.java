@@ -70,6 +70,26 @@ public class SimulationService {
 	private static final int MAX_ACTION_HISTORY = 100;
 	private static final int MAX_REACTIVE_EVENTS = 30;
 	private static final int MAX_COMMITTED_ACTIONS = 20;
+
+	// ── Chronicle (Item 8 — append-only world event log) ─────────────────────
+	private final java.util.concurrent.CopyOnWriteArrayList<ChronicleEvent> chronicle =
+		new java.util.concurrent.CopyOnWriteArrayList<>();
+	private static final int MAX_CHRONICLE_SIZE = 500;
+	private final java.util.concurrent.atomic.AtomicInteger turnCounter = new java.util.concurrent.atomic.AtomicInteger(0);
+
+	// ── Async cognition (Item 7 — PlanQueue) ─────────────────────────────────
+	// LLM planning calls run in a thread pool; the main simulation thread only
+	// APPLIES their results (via pendingCognitionApplies) at the start of each
+	// orchestration pass, keeping agent mutation single-threaded.
+	private final java.util.concurrent.ExecutorService cognitionExecutor =
+		java.util.concurrent.Executors.newFixedThreadPool(
+			Math.max(2, Runtime.getRuntime().availableProcessors() - 1));
+	/** Agents whose LLM cognition job is currently running in the background. */
+	private final java.util.Set<String> cognitionInFlight =
+		java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
+	/** Callbacks produced by worker threads, consumed by the main thread before each turn. */
+	private final java.util.concurrent.ConcurrentLinkedQueue<Runnable> pendingCognitionApplies =
+		new java.util.concurrent.ConcurrentLinkedQueue<>();
 	private List<LocationStateResponse> cachedLocations = null;
 	private List<Location> cachedLocationEntities = null;
 	private final Map<String, Deque<PlayerActionRequest>> actionHistoryByPlayer = new ConcurrentHashMap<>();
@@ -911,6 +931,21 @@ public class SimulationService {
 					if (!actorHasGrant(player, "key")) {
 						throw new SmallvilleException("You need a key to lock or unlock this.");
 					}
+					// For unlock on a locked object: enforce instance-specific key binding via ActionResolver
+					boolean isUnlockVerb = normalizedFlair.contains("action:unlock")
+						|| (normalizedVerb.contains("unlock") && !normalizedVerb.contains(" lock"));
+					if (isUnlockVerb && objectTarget.isLocked()) {
+						WorldAction unlockWa = WorldAction.fromPlayerAction(
+							player.getFullName(), "open",
+							objectTarget.getId(), WorldAction.TargetType.OBJECT,
+							null, null, player.getX(), player.getY(), 0);
+						ActionResolver.ResolveResult unlockRr = new ActionResolver(
+							buildInventoryByActor(), objectInstances, objectTypeDefinitions).resolve(unlockWa);
+						if (!unlockRr.permitted) {
+							throw new SmallvilleException(unlockRr.explanation != null
+								? unlockRr.explanation : "Your key does not open this.");
+						}
+					}
 				}
 
 				// ActionResolver gate: write requires writing_utensil grant; carry checks carriable affordance
@@ -1030,6 +1065,8 @@ public class SimulationService {
 				res.setPlayerState(fromAgentWithInventory(player));
 				res.setStressChange(stressDelta);
 				res.setResult("Interacted with " + objectTarget.getName());
+				appendChronicle(player.getFullName(), "player", normalizedVerb, objectTarget.getId(), "object",
+					verbDescription, player.getX(), player.getY(), objectTarget.getX(), objectTarget.getY());
 				return res;
 			}
 
@@ -1146,6 +1183,8 @@ public class SimulationService {
 				        res.setAgentReplyText("I need a moment to think about that.");
 				    }
 				    res.setResult("Dialogue complete");
+					appendChronicle(player.getFullName(), "player", "speak", dialogueTarget.getFullName(), "agent",
+						cleanedSpeak, player.getX(), player.getY(), dialogueTarget.getX(), dialogueTarget.getY());
 				} catch (Exception e) {
 				    LOG.warn("Dialogue ask failed for {}: {}", dialogueTarget.getFullName(), e.getMessage());
 				    res.setAgentReplyText("I need a moment to think about that.");
@@ -1779,6 +1818,12 @@ public class SimulationService {
 	List<String> deterministicUpdated = new ArrayList<>();
 	List<String> reacted = new ArrayList<>();
 
+	// ── Drain completed async cognition results (main thread) ─────────────────
+	Runnable pendingApply;
+	while ((pendingApply = pendingCognitionApplies.poll()) != null) {
+		pendingApply.run();
+	}
+
 	LocalDateTime now = SimulationTime.now();
 	LocalDate nowDate = now.toLocalDate();
 	boolean isEndOfDayReflectionMinute = now.getHour() == 23 && now.getMinute() == 59;
@@ -1834,38 +1879,53 @@ public class SimulationService {
 		}
 	    }
 
+	    boolean cogInFlight = cognitionInFlight.contains(agent.getFullName());
 	    boolean dayStart = request.isForceDayStart() || state.lastRoutineDate == null || !state.lastRoutineDate.equals(nowDate);
-	    if (dayStart && !agent.hasPendingActions()) {
-		try {
-		    injectLegalActions(agent);
-		    prompts.refreshAgentForNewDay(agent);
-		    state.lastRoutineDate = nowDate;
-		    state.lastLlmCallAt = SimulationTime.now();
-		    llmUpdated.add(agent.getFullName());
-		    traceTrackedAgent(agent, state, "after-day-start-refresh");
-		} catch (Exception e) {
-		    LOG.warn("[Runtime] Day-start refresh failed for {}: {}. Falling back to deterministic update.", agent.getFullName(), e.getMessage());
-		    applyDeterministicCatchUp(agent, isAware);
-		    deterministicUpdated.add(agent.getFullName());
-		    traceTrackedAgent(agent, state, "after-day-start-fallback");
-		}
+	    if (cogInFlight) {
+		// LLM job in flight — maintain current activity; result applied next turn
+		LOG.debug("[AsyncCognition] {} in flight, deferring this turn", agent.getFullName());
+		deterministicUpdated.add(agent.getFullName());
+	    } else if (dayStart && !agent.hasPendingActions()) {
+		// Compute legal actions now (fast, synchronous) so the async job has them ready
+		injectLegalActions(agent);
+		final Agent agentRef = agent;
+		final RuntimeAgentState stateRef = state;
+		final LocalDate routineDate = nowDate;
+		final boolean agentIsAware = isAware;
+		submitAsyncCognition(agent,
+			() -> prompts.refreshAgentForNewDay(agentRef),
+			() -> {
+				stateRef.lastRoutineDate = routineDate;
+				stateRef.lastLlmCallAt = SimulationTime.now();
+				traceTrackedAgent(agentRef, stateRef, "after-day-start-refresh");
+			},
+			() -> {
+				applyDeterministicCatchUp(agentRef, agentIsAware);
+				traceTrackedAgent(agentRef, stateRef, "after-day-start-fallback");
+			});
+		llmUpdated.add(agent.getFullName());
 	    } else if (!dayStart) {
 		ReactiveEvent event = pollReactiveEvent(agent.getFullName());
 		if (event != null) {
 		    boolean shouldLlmReact = shouldTriggerLlmReaction(event, isAware);
 		    if (shouldLlmReact) {
-			try {
-			    injectLegalActions(agent);
-			    prompts.react(agent, event.description);
-			    state.lastLlmCallAt = SimulationTime.now();
-			    reacted.add(agent.getFullName());
-			    llmUpdated.add(agent.getFullName());
-			} catch (Exception e) {
-			    LOG.warn("[Runtime] Reactive LLM update failed for {}: {}. Falling back to deterministic reaction.", agent.getFullName(), e.getMessage());
-			    applyDeterministicReactiveFallback(agent, event);
-			    deterministicUpdated.add(agent.getFullName());
-			    traceTrackedAgent(agent, state, "after-reactive-fallback");
-			}
+			injectLegalActions(agent);
+			final Agent agentRef = agent;
+			final RuntimeAgentState stateRef = state;
+			final ReactiveEvent eventRef = event;
+			final boolean agentIsAware = isAware;
+			submitAsyncCognition(agent,
+				() -> prompts.react(agentRef, eventRef.description),
+				() -> {
+					stateRef.lastLlmCallAt = SimulationTime.now();
+					traceTrackedAgent(agentRef, stateRef, "after-reactive-llm");
+				},
+				() -> {
+					applyDeterministicReactiveFallback(agentRef, eventRef);
+					traceTrackedAgent(agentRef, stateRef, "after-reactive-fallback");
+				});
+			reacted.add(agent.getFullName());
+			llmUpdated.add(agent.getFullName());
 		    } else {
 			applyDeterministicReactiveFallback(agent, event);
 			deterministicUpdated.add(agent.getFullName());
@@ -1889,6 +1949,10 @@ public class SimulationService {
 	    state.lastAware = isAware;
 	    state.lastOrchestratedAt = SimulationTime.now();
 	}
+
+	// Increment turn counter and run perception channel (Item 8)
+	turnCounter.incrementAndGet();
+	runPerceptionChannel();
 
 	summary.put("time", SimulationTime.now().toString());
 	summary.put("llmUpdatedAgents", llmUpdated);
@@ -4346,6 +4410,14 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		if (action.getDescription() != null && !action.getDescription().isBlank()) {
 			agent.setCurrentActivity(action.getDescription());
 		}
+
+		// ── Chronicle write (Item 8) ─────────────────────────────────────────────
+		String targetId = action.getTargetAgent() != null ? action.getTargetAgent()
+			: (action.getTargetLocation() != null ? action.getTargetLocation() : "");
+		String payload = action.getSpeakText() != null ? action.getSpeakText() : action.getDescription();
+		appendChronicle(agent.getFullName(), "agent", type, targetId, "unknown", payload,
+			agent.getX(), agent.getY(), 0, 0);
+
 		agent.completeActiveAction();
 	}
 
@@ -4996,18 +5068,232 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 	private Map<String, Map<String, InventoryItem>> buildInventoryByActor() {
 		Map<String, Map<String, InventoryItem>> result = new HashMap<>();
 		for (Agent agent : world.getAgents()) {
-			result.put(agent.getFullName(), agent.getInventory());
+			// Start with typed inventory (InventoryItem grants)
+			Map<String, InventoryItem> combined = new HashMap<>(agent.getInventory());
+			// Bridge legacy world-object inventory: derive grants from properties.tags + "opens"
+			for (String objId : getInventorySet(agent)) {
+				if (combined.containsKey(objId)) continue;
+				WorldObjectInstance obj = objectInstances.get(objId);
+				if (obj != null) combined.put(objId, syntheticInventoryItem(objId, obj));
+			}
+			result.put(agent.getFullName(), combined);
 		}
 		return result;
 	}
 
 	/**
-	 * Compute legal actions for the given NPC using ActionResolver and store
-	 * them on the agent as a transient field so the LLM prompt builder can
-	 * include them via {@code {{agent.legalActions}}}.
-	 *
-	 * Must be called before any LLM planning call (updateAgent, react, etc.).
+	 * Convert a legacy WorldObjectInstance held in an agent's inventory into a
+	 * synthetic InventoryItem so ActionResolver grant checks work uniformly.
+	 * Grants are derived from:
+	 *   - properties.tags[]          → one grant per tag string
+	 *   - properties.opens = "id"    → grant "opens:<id>" for key-lock binding
 	 */
+	@SuppressWarnings("unchecked")
+	private InventoryItem syntheticInventoryItem(String objId, WorldObjectInstance obj) {
+		InventoryItem item = new InventoryItem();
+		item.setId(objId);
+		item.setTypeId(obj.getTypeId());
+		item.setDisplayName(obj.getName());
+		item.setConsumable(false);
+		Map<String, Object> props = obj.getProperties();
+		if (props != null) {
+			Object tagsObj = props.get("tags");
+			if (tagsObj instanceof List<?> tags) {
+				for (Object t : tags) item.addGrant(String.valueOf(t));
+			}
+			Object opensObj = props.get("opens");
+			if (opensObj != null) {
+				String target = String.valueOf(opensObj).strip();
+				if (!target.isBlank()) item.addGrant("opens:" + target);
+			}
+		}
+		return item;
+	}
+
+	/**
+	 * Compute the set of legal actions for a player given their current position.
+	 * Returns structured descriptors that the Godot client uses to filter its
+	 * context menu — server is authoritative, especially for key-lock binding.
+	 */
+	public List<Map<String, String>> getPlayerLegalActions(String playerName, double x, double y) {
+		Agent agent = world.getAgent(playerName)
+			.orElseThrow(() -> new AgentNotFoundException(playerName));
+
+		List<String> nearbyAgentIds = world.getAgents().stream()
+			.filter(a -> !a.getFullName().equals(playerName))
+			.filter(a -> {
+				double dx = a.getX() - x;
+				double dy = a.getY() - y;
+				return Math.sqrt(dx * dx + dy * dy) / TILE_SIZE <= AGENTIC_SOCIAL_AWARENESS_TILE_DISTANCE;
+			})
+			.map(Agent::getFullName)
+			.collect(Collectors.toList());
+
+		ActionResolver resolver = new ActionResolver(
+			buildInventoryByActor(), objectInstances, objectTypeDefinitions);
+		return resolver.legalDescriptorsFor(playerName, x, y, nearbyAgentIds).stream()
+			.map(ActionResolver.ActionDescriptor::toMap)
+			.collect(Collectors.toList());
+	}
+
+	/**
+	 * GET /agents/{name}/epistemic — returns the agent's current EpistemicMemory.
+	 * Includes recent observed events, hearsay, and the latest belief correction.
+	 */
+	public Map<String, Object> getAgentEpistemicState(String name) {
+		Agent agent = world.getAgent(name)
+			.orElseThrow(() -> new AgentNotFoundException(name));
+		EpistemicMemory em = agent.getEpistemicMemory();
+
+		List<Map<String, Object>> observed = em.recentObserved(20).stream()
+			.map(o -> {
+				Map<String, Object> m = new LinkedHashMap<>();
+				m.put("turn", o.turnNumber);
+				m.put("actor", o.actorId);
+				m.put("verb", o.verb);
+				m.put("target", o.targetId);
+				m.put("payload", o.payload != null ? o.payload : "");
+				m.put("actorX", o.actorX);
+				m.put("actorY", o.actorY);
+				return m;
+			})
+			.collect(Collectors.toList());
+
+		List<Map<String, Object>> hearsay = em.recentHearsay(20).stream()
+			.map(h -> {
+				Map<String, Object> m = new LinkedHashMap<>();
+				m.put("turn", h.turnNumber);
+				m.put("source", h.sourceActorId);
+				m.put("content", h.content);
+				m.put("confidence", h.confidence);
+				return m;
+			})
+			.collect(Collectors.toList());
+
+		EpistemicMemory.BeliefCorrection corr = em.latestCorrection();
+		Object correction = null;
+		if (corr != null) {
+			Map<String, Object> cm = new LinkedHashMap<>();
+			cm.put("turn", corr.turnNumber);
+			cm.put("verb", corr.attemptedVerb);
+			cm.put("target", corr.targetId);
+			cm.put("reason", corr.rejectReason.toString());
+			cm.put("believed", corr.believed);
+			cm.put("reality", corr.reality);
+			correction = cm;
+		}
+
+		Map<String, Object> counts = new LinkedHashMap<>();
+		counts.put("observed", em.observedCount());
+		counts.put("hearsay", em.hearsayCount());
+		counts.put("corrections", em.correctionCount());
+
+		Map<String, Object> result = new LinkedHashMap<>();
+		result.put("agent", name);
+		result.put("counts", counts);
+		result.put("observed", observed);
+		result.put("hearsay", hearsay);
+		result.put("latestCorrection", correction);
+		return result;
+	}
+
+	/**
+	 * Gracefully shut down the cognition executor. Called from the JVM shutdown hook.
+	 * Logs any agents with in-flight cognition jobs that will not complete.
+	 */
+	public void shutdown() {
+		if (!cognitionInFlight.isEmpty()) {
+			LOG.info("[Shutdown] {} agent(s) had in-flight cognition: {}",
+				cognitionInFlight.size(), String.join(", ", cognitionInFlight));
+		}
+		cognitionExecutor.shutdown();
+		try {
+			if (!cognitionExecutor.awaitTermination(8, java.util.concurrent.TimeUnit.SECONDS)) {
+				List<Runnable> cancelled = cognitionExecutor.shutdownNow();
+				LOG.info("[Shutdown] Forced shutdown — {} pending task(s) discarded", cancelled.size());
+			}
+		} catch (InterruptedException e) {
+			cognitionExecutor.shutdownNow();
+			Thread.currentThread().interrupt();
+		}
+		LOG.info("[Shutdown] Cognition executor terminated.");
+	}
+
+	/**
+	 * Submit a cognition job for an agent to the background thread pool.
+	 *
+	 * The job runs LLM calls on the worker thread and posts result lambdas to
+	 * {@code pendingCognitionApplies}. The main thread drains that queue at the
+	 * start of each orchestration pass (single-threaded agent mutation).
+	 *
+	 * @param agent        the agent needing cognition
+	 * @param cognitionJob the LLM work to run (may mutate agent directly)
+	 * @param onComplete   callback posted to pendingCognitionApplies after success
+	 * @param onError      callback posted to pendingCognitionApplies on failure
+	 */
+	// ── Chronicle helpers (Item 8) ────────────────────────────────────────────
+
+	/**
+	 * Append a ChronicleEvent. WitnessIds are computed as all agents within
+	 * social awareness range of the event origin.
+	 */
+	private void appendChronicle(String actorId, String actorType, String verb,
+								  String targetId, String targetType, String payload,
+								  double actorX, double actorY,
+								  double targetX, double targetY) {
+		int turn = turnCounter.get();
+		Set<String> witnesses = world.getAgents().stream()
+			.filter(a -> {
+				double dx = a.getX() - actorX;
+				double dy = a.getY() - actorY;
+				return Math.sqrt(dx * dx + dy * dy) / TILE_SIZE <= AGENTIC_SOCIAL_AWARENESS_TILE_DISTANCE;
+			})
+			.map(Agent::getFullName)
+			.collect(Collectors.toSet());
+		ChronicleEvent evt = new ChronicleEvent(turn, actorId, actorType, verb,
+			targetId, targetType, payload, actorX, actorY, targetX, targetY, witnesses);
+		chronicle.add(evt);
+		if (chronicle.size() > MAX_CHRONICLE_SIZE) {
+			chronicle.subList(0, chronicle.size() - MAX_CHRONICLE_SIZE).clear();
+		}
+	}
+
+	/**
+	 * Perception channel: for each ChronicleEvent from the current turn,
+	 * admit it into the EpistemicMemory of every witness agent (not players).
+	 * Called once per orchestration pass after action processing.
+	 */
+	private void runPerceptionChannel() {
+		int currentTurn = turnCounter.get();
+		for (ChronicleEvent evt : chronicle) {
+			if (evt.getTurnNumber() != currentTurn) continue;
+			for (String witnessId : evt.getWitnessIds()) {
+				world.getAgent(witnessId).ifPresent(witness -> {
+					if (witness instanceof Player) return;
+					witness.getEpistemicMemory().ingestObserved(evt);
+				});
+			}
+		}
+	}
+
+	private void submitAsyncCognition(Agent agent, Runnable cognitionJob,
+									  Runnable onComplete, Runnable onError) {
+		String name = agent.getFullName();
+		if (cognitionInFlight.contains(name)) return;
+		cognitionInFlight.add(name);
+		cognitionExecutor.submit(() -> {
+			try {
+				cognitionJob.run();
+				pendingCognitionApplies.offer(onComplete);
+			} catch (Exception e) {
+				LOG.warn("[AsyncCognition] {} failed: {}", name, e.getMessage());
+				pendingCognitionApplies.offer(onError);
+			} finally {
+				cognitionInFlight.remove(name);
+			}
+		});
+	}
+
 	private void injectLegalActions(Agent agent) {
 		if (agent == null) return;
 		try {

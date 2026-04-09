@@ -20,6 +20,7 @@ public class SmallvilleServer {
 
     public SmallvilleServer(Analytics analytics, LLM llm, World sim) {
 	this.service = new SimulationService(llm, sim);
+	Runtime.getRuntime().addShutdownHook(new Thread(() -> this.service.shutdown(), "cognition-shutdown"));
 	this.mf = new DefaultMustacheFactory();
 	this.analytics = analytics;
 	this.server = Javalin.create(config -> {

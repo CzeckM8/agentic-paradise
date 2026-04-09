@@ -298,6 +298,36 @@ public final class SimulationController {
 		}
 	}
 
+	/**
+	 * Returns the server-authoritative legal action list for a player.
+	 * The Godot client uses this to filter grant-gated context menu entries
+	 * (e.g. unlock requires the specific key that opens this door instance).
+	 *
+	 * GET /player/{name}/legal_actions?x=N&y=N
+	 * Returns: [{verb, targetId, targetName, targetKind, label}, ...]
+	 */
+	@Get("/player/{name}/legal_actions")
+	public void getPlayerLegalActions(Context ctx, @Param("name") String name) {
+		String rawX = ctx.queryParam("x");
+		String rawY = ctx.queryParam("y");
+		double x = rawX != null ? parseDoubleOrZero(rawX) : 0;
+		double y = rawY != null ? parseDoubleOrZero(rawY) : 0;
+		ctx.json(service.getPlayerLegalActions(name, x, y));
+	}
+
+	private double parseDoubleOrZero(String s) {
+		try { return Double.parseDouble(s); } catch (NumberFormatException e) { return 0; }
+	}
+
+	/**
+	 * GET /agents/{name}/epistemic
+	 * Returns the agent's current EpistemicMemory: observed events, hearsay, and latest belief correction.
+	 */
+	@Get("/agents/{name}/epistemic")
+	public void getAgentEpistemic(Context ctx, @Param("name") String name) {
+		ctx.json(service.getAgentEpistemicState(name));
+	}
+
 	@Get("/conversations/history")
 	public void getConversationHistory(Context ctx) {
 		String a = ctx.queryParam("a");
