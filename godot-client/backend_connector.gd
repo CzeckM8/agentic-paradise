@@ -44,6 +44,7 @@ var last_runtime_request = {}
 var turn_request_in_flight = false
 var pending_move_action = {}
 var location_overlays: Node2D = null
+var floor_tiles_container: Node2D = null
 var object_overlays: Node2D = null
 var grid_overlay: Node2D = null
 var world_objects: Array = []
@@ -869,7 +870,6 @@ func _get_default_object_type_definitions() -> Dictionary:
 
 func _get_default_world_objects() -> Array:
 	return [
-		# Street pathing and transitions
 		# Market
 		{"id":"market_entry_street","type":"entrance_anchor","name":"Market Entrance","x":600,"y":260,"location":"market","properties":{"linkedHint":"street","building":"market","transition_point":true,"locked":false,"passable":true}},
 		{"id":"market_counter","type":"work_spot","name":"Produce Counter","x":460,"y":200,"location":"market","properties":{"activity":["sell","buy","trade"],"adjacentPreferred":true,"passable":false,"height":"counter","flat_surface":true}},
@@ -906,7 +906,47 @@ func _get_default_world_objects() -> Array:
 		{"id":"item_pencil_coffee","type":"decor","name":"Pencil","x":1345,"y":95,"location":"coffee_shop","properties":{"carriable":true,"passable":true,"height":"low","tags":["writing_utensil","pen"],"description":"A pencil left near the bulletin board."}},
 		{"id":"item_knife_tavern","type":"decor","name":"Pocket Knife","x":995,"y":145,"location":"tavern","properties":{"carriable":true,"passable":true,"height":"low","tags":["knife","blade","tool"],"description":"A folding knife with a worn wooden handle."}},
 		{"id":"item_coin_square","type":"decor","name":"Coin Purse","x":790,"y":870,"location":"town_square","properties":{"carriable":true,"passable":true,"height":"low","tags":["coins","currency","valuables"],"description":"A small leather coin purse, a few coins jingling inside."}},
-		{"id":"item_key_home","type":"decor","name":"House Key","x":240,"y":725,"location":"home","properties":{"carriable":true,"passable":true,"height":"low","tags":["key","unlock"],"description":"A brass door key on a simple ring."}}
+		{"id":"item_key_home","type":"decor","name":"House Key","x":240,"y":725,"location":"home","properties":{"carriable":true,"passable":true,"height":"low","tags":["key","unlock"],"description":"A brass door key on a simple ring."}},
+
+		# ── Market extras ────────────────────────────────────────────────────────
+		{"id":"market_stall_b","type":"work_spot","name":"Dry Goods Stall","x":300,"y":200,"location":"market","properties":{"activity":["sell","buy","barter"],"passable":false,"height":"counter","flat_surface":true,"description":"A wooden stall piled with dried beans, grain sacks, and spices."}},
+		{"id":"market_table_a","type":"fixture","name":"Display Table","x":350,"y":300,"location":"market","properties":{"passable":false,"height":"medium","flat_surface":true,"description":"A rough-hewn table used to display today's produce."}},
+		{"id":"market_chair_a","type":"decor","name":"Stool","x":420,"y":350,"location":"market","properties":{"sittable":true,"passable":true,"height":"low","description":"A rickety three-legged stool behind the counter."}},
+		{"id":"market_barrel_a","type":"fixture","name":"Pickle Barrel","x":100,"y":380,"location":"market","properties":{"passable":false,"height":"medium","inspectable":true,"description":"A large barrel. It smells strongly of brine."}},
+		{"id":"market_barrel_b","type":"fixture","name":"Grain Barrel","x":160,"y":380,"location":"market","properties":{"passable":false,"height":"medium","inspectable":true,"description":"A barrel stuffed with rough-ground flour."}},
+		{"id":"item_basket_market","type":"decor","name":"Wicker Basket","x":260,"y":200,"location":"market","properties":{"carriable":true,"passable":true,"height":"low","tags":["container"],"description":"A wicker basket filled with bruised apples."}},
+
+		# ── Tavern extras ─────────────────────────────────────────────────────────
+		{"id":"tavern_table_c","type":"fixture","name":"Corner Table","x":750,"y":380,"location":"tavern","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"description":"A small corner table, sticky from years of spilled ale."}},
+		{"id":"tavern_chair_a","type":"decor","name":"Chair","x":800,"y":340,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair, one leg slightly shorter than the others."}},
+		{"id":"tavern_chair_b","type":"decor","name":"Chair","x":860,"y":260,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair."}},
+		{"id":"tavern_chair_c","type":"decor","name":"Chair","x":1060,"y":260,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair."}},
+		{"id":"tavern_chair_d","type":"decor","name":"Chair","x":1100,"y":350,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair."}},
+		{"id":"tavern_chair_e","type":"decor","name":"Chair","x":780,"y":420,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair beside the corner table."}},
+		{"id":"tavern_stool_a","type":"decor","name":"Barstool","x":920,"y":180,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A tall stool at the bar, the seat worn smooth."}},
+		{"id":"tavern_stool_b","type":"decor","name":"Barstool","x":1040,"y":180,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A tall stool at the bar."}},
+
+		# ── Coffee shop extras ────────────────────────────────────────────────────
+		{"id":"coffee_table_b","type":"fixture","name":"Corner Table","x":1550,"y":280,"location":"coffee_shop","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"description":"A small round table tucked into the corner."}},
+		{"id":"coffee_chair_a","type":"decor","name":"Chair","x":1410,"y":330,"location":"coffee_shop","properties":{"sittable":true,"passable":true,"height":"low","description":"A cushioned chair by the window."}},
+		{"id":"coffee_chair_b","type":"decor","name":"Chair","x":1480,"y":330,"location":"coffee_shop","properties":{"sittable":true,"passable":true,"height":"low","description":"A cushioned chair by the window."}},
+		{"id":"coffee_chair_c","type":"decor","name":"Chair","x":1510,"y":320,"location":"coffee_shop","properties":{"sittable":true,"passable":true,"height":"low","description":"A chair at the corner table."}},
+		{"id":"coffee_chair_d","type":"decor","name":"Chair","x":1600,"y":320,"location":"coffee_shop","properties":{"sittable":true,"passable":true,"height":"low","description":"A chair at the corner table."}},
+		{"id":"coffee_shelf","type":"fixture","name":"Pastry Display","x":1630,"y":220,"location":"coffee_shop","properties":{"passable":false,"height":"counter","flat_surface":true,"description":"A glass-fronted case holding a few pastries and a wedge of hard cheese."}},
+
+		# ── Town square extras ────────────────────────────────────────────────────
+		{"id":"square_bench_a","type":"fixture","name":"Park Bench","x":550,"y":900,"location":"town_square","properties":{"sittable":true,"passable":false,"height":"low","description":"A weathered wooden bench. Good for watching the crowd."}},
+		{"id":"square_bench_b","type":"fixture","name":"Park Bench","x":970,"y":860,"location":"town_square","properties":{"sittable":true,"passable":false,"height":"low","description":"A weathered wooden bench near the fountain."}},
+		{"id":"square_table_a","type":"fixture","name":"Picnic Table","x":680,"y":1060,"location":"town_square","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"description":"A heavy stone picnic table, often used for card games."}},
+		{"id":"square_chair_a","type":"decor","name":"Chair","x":640,"y":1100,"location":"town_square","properties":{"sittable":true,"passable":true,"height":"low","description":"A folding wooden chair."}},
+		{"id":"square_chair_b","type":"decor","name":"Chair","x":720,"y":1100,"location":"town_square","properties":{"sittable":true,"passable":true,"height":"low","description":"A folding wooden chair."}},
+		{"id":"item_book_square","type":"decor","name":"Worn Journal","x":500,"y":800,"location":"town_square","properties":{"carriable":true,"passable":true,"height":"low","writable":true,"has_writing":"Belonged to someone — half the pages are torn out.","tags":["writing_utensil","book"],"description":"A battered journal with a cracked leather cover."}},
+
+		# ── Home extras ───────────────────────────────────────────────────────────
+		{"id":"home_table","type":"fixture","name":"Dining Table","x":200,"y":780,"location":"home","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"description":"A simple square table with a chipped surface."}},
+		{"id":"home_chair_a","type":"decor","name":"Chair","x":160,"y":810,"location":"home","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair at the table."}},
+		{"id":"home_chair_b","type":"decor","name":"Chair","x":240,"y":810,"location":"home","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair at the table."}},
+		{"id":"home_wardrobe","type":"fixture","name":"Wardrobe","x":310,"y":880,"location":"home","properties":{"passable":false,"height":"tall","inspectable":true,"description":"A tall wooden wardrobe. The door sticks a little."}}
 	]
 
 # LOCATION FUNCTIONS
@@ -1015,7 +1055,7 @@ func _apply_locations_from_response_data(response_data) -> bool:
 			}
 
 	print("Loaded %d locations with spatial data: %s" % [locations.size(), locations.keys()])
-	_redraw_location_overlays()
+	_redraw_floor_tiles()
 	_redraw_grid_overlay()
 	return true
 
@@ -3381,7 +3421,7 @@ func _update_world(state):
 					"centerX": (loc_obj.get("minX", 0.0) + loc_obj.get("maxX", 100.0)) / 2.0,
 					"centerY": (loc_obj.get("minY", 0.0) + loc_obj.get("maxY", 100.0)) / 2.0
 				}
-		_redraw_location_overlays()
+		_redraw_floor_tiles()
 	elif state.has("locations"):
 		var locs = state.locations
 		for loc_obj in locs:
@@ -3397,7 +3437,7 @@ func _update_world(state):
 					"centerX": (loc_obj.get("minX", 0.0) + loc_obj.get("maxX", 100.0)) / 2.0,
 					"centerY": (loc_obj.get("minY", 0.0) + loc_obj.get("maxY", 100.0)) / 2.0
 				}
-		_redraw_location_overlays()
+		_redraw_floor_tiles()
 	
 	# Update debug info
 	if state.has("agents"):
@@ -4207,6 +4247,103 @@ func _ensure_location_overlay_container():
 		var tile_layer = world_node.get_node("TileMapLayer")
 		world_node.move_child(location_overlays, tile_layer.get_index() + 1)
 
+func _ensure_floor_tiles_container():
+	"""Create a world-space container for tiled floor sprites, drawn below all overlays."""
+	if world_node == null:
+		return
+
+	if world_node.has_node("FloorTiles"):
+		floor_tiles_container = world_node.get_node("FloorTiles") as Node2D
+		return
+
+	floor_tiles_container = Node2D.new()
+	floor_tiles_container.name = "FloorTiles"
+	floor_tiles_container.z_index = -10
+	world_node.add_child(floor_tiles_container)
+
+func _get_floor_texture_path(loc_type: String, loc_name: String) -> String:
+	"""Map a location type (and name fallback) to the appropriate floor sprite."""
+	var t = loc_type.to_lower()
+	var n = loc_name.to_lower()
+	if t in ["outside", "street", "road"] or n == "street" or n == "outside":
+		return "res://assets/floor_sprites/grass_floor.png"
+	if t == "tavern" or n == "tavern":
+		return "res://assets/floor_sprites/wood_floor_fine.png"
+	if t in ["cafe", "coffee", "cafe_shop"] or n.contains("coffee") or n.contains("cafe"):
+		return "res://assets/floor_sprites/tile_floor.png"
+	if t == "market" or n == "market":
+		return "res://assets/floor_sprites/stone_floor.png"
+	if t in ["public", "plaza", "park"] or n.contains("square") or n.contains("plaza"):
+		return "res://assets/floor_sprites/stone_floor_grassy.png"
+	if t in ["residential", "home", "house"] or n == "home":
+		return "res://assets/floor_sprites/wood_floor_pane.png"
+	return "res://assets/floor_sprites/stone_floor.png"
+
+func _redraw_floor_tiles():
+	"""Fill each location's bounds with a tiled floor sprite."""
+	if floor_tiles_container == null:
+		_ensure_floor_tiles_container()
+	if floor_tiles_container == null:
+		return
+
+	for child in floor_tiles_container.get_children():
+		child.queue_free()
+
+	# Separate outdoor (background) from enclosed so outdoor is drawn first.
+	var outdoor_locs: Array = []
+	var enclosed_locs: Array = []
+	for loc_name in locations.keys():
+		var loc = locations[loc_name]
+		if not (loc is Dictionary):
+			continue
+		var min_x = float(loc.get("minX", 0.0))
+		var max_x = float(loc.get("maxX", min_x))
+		var min_y = float(loc.get("minY", 0.0))
+		var max_y = float(loc.get("maxY", min_y))
+		if max_x <= min_x or max_y <= min_y:
+			continue
+		if _is_transit_location_name(loc_name, loc):
+			outdoor_locs.append(loc_name)
+		else:
+			enclosed_locs.append(loc_name)
+
+	for loc_name in outdoor_locs + enclosed_locs:
+		var loc = locations[loc_name]
+		var min_x = float(loc.get("minX", 0.0))
+		var max_x = float(loc.get("maxX", min_x))
+		var min_y = float(loc.get("minY", 0.0))
+		var max_y = float(loc.get("maxY", min_y))
+		var loc_type = str(loc.get("type", "generic"))
+		var tex_path = _get_floor_texture_path(loc_type, loc_name)
+		var tex = load(tex_path) as Texture2D
+		if tex == null:
+			continue
+
+		var w = max_x - min_x
+		var h = max_y - min_y
+		var tex_size = tex.get_size()
+		# Scale UVs so exactly 1 game tile (tile_size px) = 1 full texture repeat.
+		var uv_w = (w / tile_size) * tex_size.x
+		var uv_h = (h / tile_size) * tex_size.y
+
+		var floor_poly = Polygon2D.new()
+		floor_poly.texture = tex
+		floor_poly.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+		floor_poly.modulate = Color(1.0, 1.0, 1.0, 1.0)
+		floor_poly.polygon = PackedVector2Array([
+			Vector2(min_x, min_y),
+			Vector2(max_x, min_y),
+			Vector2(max_x, max_y),
+			Vector2(min_x, max_y)
+		])
+		floor_poly.uv = PackedVector2Array([
+			Vector2(0.0,  0.0),
+			Vector2(uv_w, 0.0),
+			Vector2(uv_w, uv_h),
+			Vector2(0.0,  uv_h)
+		])
+		floor_tiles_container.add_child(floor_poly)
+
 func _ensure_object_overlay_container():
 	"""Create a world-space container for object markers and zones."""
 	if world_node == null:
@@ -4232,7 +4369,7 @@ func _ensure_grid_overlay_container():
 
 	grid_overlay = Node2D.new()
 	grid_overlay.name = "GridOverlay"
-	grid_overlay.z_index = -3
+	grid_overlay.z_index = 10
 	world_node.add_child(grid_overlay)
 
 func _redraw_grid_overlay():
@@ -4368,7 +4505,21 @@ func _redraw_object_overlays():
 		var radius = _get_object_marker_radius(object_type)
 
 		var los_alpha = 1.0 if in_los else 0.15
-		var marker = _make_object_marker(object_type, tile_center, radius, color)
+		var sprite_path = _get_object_sprite_path(obj)
+		var marker: Node2D
+		if sprite_path != "":
+			var tex = load(sprite_path) as Texture2D
+			if tex != null:
+				var sprite_node = Node2D.new()
+				var sprite = Sprite2D.new()
+				sprite.texture = tex
+				sprite.position = tile_center
+				var ts = tex.get_size()
+				sprite.scale = Vector2(tile_size / ts.x, tile_size / ts.y)
+				sprite_node.add_child(sprite)
+				marker = sprite_node
+		if marker == null:
+			marker = _make_object_marker(object_type, tile_center, radius, color)
 		marker.modulate.a = los_alpha
 		object_overlays.add_child(marker)
 
@@ -4384,6 +4535,46 @@ func _redraw_object_overlays():
 		label.add_theme_font_size_override("font_size", 10)
 		label.modulate = Color(0.98, 0.98, 0.98, 0.95)
 		object_overlays.add_child(label)
+
+func _get_object_sprite_path(obj: Dictionary) -> String:
+	"""Return res:// path to a sprite for this object, or "" to fall back to geometric marker."""
+	var otype = str(obj.get("type", "")).to_lower()
+	var oid   = str(obj.get("id",   "")).to_lower()
+	var oname = str(obj.get("name", "")).to_lower()
+	var loc   = str(obj.get("location", "")).to_lower()
+
+	if otype == "wall":
+		return "res://assets/objects/brick_wall.png"
+
+	if otype == "entrance_anchor":
+		if loc == "tavern":
+			return "res://assets/objects/tavern_door.png"
+		if loc == "coffee_shop":
+			return "res://assets/objects/coffee_shop_door.png"
+		if loc == "market":
+			return "res://assets/objects/market_door.png"
+		return "res://assets/objects/house_door.png"
+
+	if oid.contains("coffee_machine") or oname.contains("espresso"):
+		return "res://assets/objects/coffee_machine.png"
+	if oid.contains("register") or oname.contains("register"):
+		return "res://assets/objects/register.png"
+	if oname.contains("table") or oid.contains("table"):
+		return "res://assets/objects/table.png"
+	if oname.contains("chair") or oid.contains("chair") or oname.contains("stool") or oid.contains("stool"):
+		return "res://assets/objects/chair.png"
+	if oname.contains("bed") or oid.contains("bed") or oname.contains("bedside"):
+		return "res://assets/objects/bed.png"
+	if oname.contains("pencil") or oid.contains("pencil"):
+		return "res://assets/objects/pencil.png"
+	if (oname.contains("key") or oid.contains("key")) and not oname.contains("turkey"):
+		return "res://assets/objects/key.png"
+	if oname.contains("coin") or oid.contains("coin") or oname.contains("purse"):
+		return "res://assets/objects/coin_purse.png"
+	if oname.contains("knife") or oid.contains("knife") or oname.contains("blade"):
+		return "res://assets/objects/pocket_kinfe.png"
+
+	return ""
 
 func _make_object_marker(object_type: String, center: Vector2, radius: float, color: Color) -> Node2D:
 	var node = Node2D.new()

@@ -913,6 +913,31 @@ public class SimulationService {
 					}
 				}
 
+				// ActionResolver gate: write requires writing_utensil grant; carry checks carriable affordance
+				{
+					String resolverVerb = null;
+					if (normalizedFlair.contains("action:write")
+							|| normalizedVerb.startsWith("write on") || normalizedVerb.contains("writing on")) {
+						resolverVerb = "write";
+					} else if (normalizedFlair.contains("action:carry")
+							|| (normalizedVerb.contains("carry") && !normalizedVerb.contains("can't carry"))) {
+						resolverVerb = "carry";
+					}
+					if (resolverVerb != null) {
+						WorldAction wa = WorldAction.fromPlayerAction(
+							player.getFullName(), resolverVerb,
+							objectTarget.getId(), WorldAction.TargetType.OBJECT,
+							request.getItem(), request.getSpeakText(),
+							player.getX(), player.getY(), 0);
+						ActionResolver.ResolveResult rr = new ActionResolver(
+							buildInventoryByActor(), objectInstances, objectTypeDefinitions).resolve(wa);
+						if (!rr.permitted) {
+							throw new SmallvilleException(rr.explanation != null
+								? rr.explanation : "Cannot perform action: " + resolverVerb);
+						}
+					}
+				}
+
 				// Lock / unlock (new vocabulary)
 				if (normalizedFlair.contains("action:unlock") || (normalizedVerb.contains("unlock") && !normalizedVerb.contains("lock"))) {
 					objectTarget.getProperties().put("locked", false);
@@ -4254,6 +4279,61 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 
 	private void completeWorldAction(Agent agent, AgentAction action) {
 		String type = action.getType() == null ? "activity" : action.getType().toLowerCase();
+
+		// ── ActionResolver gate for object-targeting NPC verbs ───────────────────
+		String objectId = action.getTargetAgent();
+		if (Set.of("carry", "write", "open", "close", "inspect").contains(type)
+				&& objectId != null && objectInstances.containsKey(objectId)) {
+			WorldAction wa = WorldAction.fromAgentAction(agent.getFullName(), action, 0);
+			wa.setTargetId(objectId);
+			wa.setTargetType(WorldAction.TargetType.OBJECT);
+			wa.setActorX(agent.getX());
+			wa.setActorY(agent.getY());
+
+			ActionResolver.ResolveResult rr = new ActionResolver(
+				buildInventoryByActor(), objectInstances, objectTypeDefinitions).resolve(wa);
+
+			if (!rr.permitted) {
+				LOG.info("[completeWorldAction] NPC {} '{}' on '{}' rejected: {}",
+					agent.getFullName(), type, objectId, rr.explanation);
+				agent.completeActiveAction();
+				return;
+			}
+
+			// Apply state mutations on permit
+			WorldObjectInstance obj = objectInstances.get(objectId);
+			if (obj != null) {
+				switch (type) {
+					case "carry" -> {
+						obj.setHeldBy(agent.getFullName());
+						obj.setLocation(null);
+						obj.setX(agent.getX());
+						obj.setY(agent.getY());
+					}
+					case "write" -> {
+						String text = action.getSpeakText() != null && !action.getSpeakText().isBlank()
+							? action.getSpeakText() : action.getDescription();
+						if (text != null && !text.isBlank()) {
+							obj.getProperties().put("has_writing", text);
+						}
+					}
+					case "open" -> {
+						obj.setState("isOpen", true);
+						obj.setState("isLocked", false);
+						obj.getProperties().put("doorOpen", true);
+						obj.getProperties().put("passable", true);
+						obj.getProperties().put("locked", false);
+					}
+					case "close" -> {
+						obj.setState("isOpen", false);
+						obj.getProperties().put("doorOpen", false);
+						obj.getProperties().put("passable", false);
+					}
+				}
+			}
+		}
+
+		// ── Existing logic ───────────────────────────────────────────────────────
 		if ("pickup".equals(type) && action.getItem() != null && agent instanceof Player player) {
 			player.addItem(action.getItem());
 		}
@@ -4724,6 +4804,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			object.setProperties(new HashMap<>());
 		}
 		object.getProperties().put("heldBy", actor.getFullName());
+		object.setHeldBy(actor.getFullName()); // keep isCarried() in sync with ActionResolver
 		object.setLocation(null);
 		object.setX(actor.getX());
 		object.setY(actor.getY());

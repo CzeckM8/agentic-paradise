@@ -1,12 +1,13 @@
-[gd_scene load_steps=2 format=3 uid="uid://ykmtje5g04en"]
+[gd_scene format=3 uid="uid://ykmtje5g04en"]
 
 [ext_resource type="Script" uid="uid://sy7paoes1sa8" path="res://agent.gd" id="1_jv27j"]
 
-[node name="Agent" type="Node2D"]
+[node name="Agent" type="Node2D" unique_id=1739944837]
 script = ExtResource("1_jv27j")
 
-[node name="Sprite2D" type="Sprite2D" parent="."]
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=1942188830]
 
-[node name="Label" type="Label" parent="."]
+[node name="Label" type="Label" parent="." unique_id=1260599779]
+visible = false
 offset_right = 40.0
 offset_bottom = 23.0

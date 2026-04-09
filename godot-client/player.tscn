@@ -1,19 +1,20 @@
-[gd_scene load_steps=3 format=3 uid="uid://b1uaq6jcnjj1q"]
+[gd_scene format=3 uid="uid://b1uaq6jcnjj1q"]
 
-[ext_resource type="Script" path="res://player.gd" id="1_lv5ox"]
+[ext_resource type="Script" uid="uid://cs7ghrp5b2rib" path="res://player.gd" id="1_lv5ox"]
 [ext_resource type="Script" path="res://camera.gd" id="2_cam"]
 
-[node name="Player" type="Node2D"]
+[node name="Player" type="Node2D" unique_id=510202760]
 script = ExtResource("1_lv5ox")
 
-[node name="Sprite2D" type="Sprite2D" parent="."]
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=811760937]
 
-[node name="Label" type="Label" parent="."]
+[node name="Label" type="Label" parent="." unique_id=2063671055]
+visible = false
 offset_left = -50.0
 offset_top = -50.0
 offset_right = 50.0
 offset_bottom = 50.0
 text = "Player"
 
-[node name="Camera" type="Camera2D" parent="."]
+[node name="Camera" type="Camera2D" parent="." unique_id=1410594300]
 script = ExtResource("2_cam")
