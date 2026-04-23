@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Single enforcement point for all world actions.
@@ -278,6 +279,109 @@ public class ActionResolver {
     // ── Pre-compute legal actions for LLM prompt ──────────────────────────────
 
     /**
+     * Structured descriptor for one legal action. Used by the client endpoint
+     * so the client doesn't have to parse "verb(name)" strings.
+     */
+    public static class ActionDescriptor {
+        public final String verb;
+        public final String targetId;
+        public final String targetName;
+        public final String targetKind; // "object", "agent"
+        public final String label;
+
+        public ActionDescriptor(String verb, String targetId, String targetName,
+                                String targetKind, String label) {
+            this.verb = verb;
+            this.targetId = targetId;
+            this.targetName = targetName;
+            this.targetKind = targetKind;
+            this.label = label;
+        }
+
+        public java.util.Map<String, String> toMap() {
+            java.util.Map<String, String> m = new java.util.LinkedHashMap<>();
+            m.put("verb", verb);
+            m.put("targetId", targetId);
+            m.put("targetName", targetName);
+            m.put("targetKind", targetKind);
+            m.put("label", label);
+            return m;
+        }
+    }
+
+    /**
+     * Returns structured action descriptors for a given actor — used by the
+     * player context-action endpoint so the client can filter its UI by
+     * server-authoritative grants (e.g. instance-specific key binding).
+     */
+    public List<ActionDescriptor> legalDescriptorsFor(String actorId, double actorX, double actorY,
+                                                      List<String> nearbyAgentIds) {
+        List<ActionDescriptor> descriptors = new ArrayList<>();
+        Map<String, InventoryItem> inventory = inventoryByActor.getOrDefault(actorId, Map.of());
+
+        for (WorldObjectInstance obj : objectInstances.values()) {
+            double dx = actorX - obj.getX();
+            double dy = actorY - obj.getY();
+            double distTiles = Math.sqrt(dx * dx + dy * dy) / TILE_SIZE;
+            if (distTiles > DEFAULT_INTERACTION_RANGE_TILES) continue;
+
+            Map<String, Object> props = mergedProperties(obj);
+            String id = obj.getInstanceId();
+            String name = obj.getName();
+
+            if (Boolean.TRUE.equals(props.get("interactive"))) {
+                descriptors.add(new ActionDescriptor("inspect", id, name, "object", "Inspect"));
+            }
+
+            if (Boolean.TRUE.equals(props.get("can_open_close"))) {
+                if (!obj.isOpen()) {
+                    if (!obj.isLocked()) {
+                        descriptors.add(new ActionDescriptor("open", id, name, "object", "Open"));
+                    } else {
+                        boolean hasKey = inventory.values().stream().anyMatch(i -> i.opensInstance(id));
+                        if (hasKey) descriptors.add(new ActionDescriptor("open", id, name, "object", "Open"));
+                    }
+                } else {
+                    descriptors.add(new ActionDescriptor("close", id, name, "object", "Close"));
+                }
+            }
+
+            // transition_point (door/gate): lock/unlock based on locked state and key
+            if (Boolean.TRUE.equals(props.get("transition_point"))) {
+                boolean locked = Boolean.TRUE.equals(props.get("locked"));
+                if (locked) {
+                    boolean hasKey = inventory.values().stream().anyMatch(i -> i.opensInstance(id));
+                    if (hasKey) {
+                        descriptors.add(new ActionDescriptor("unlock", id, name, "object", "Unlock"));
+                    }
+                } else {
+                    boolean hasKey = !inventory.isEmpty() && inventory.values().stream()
+                            .anyMatch(i -> i.hasGrant("key") || i.opensInstance(id));
+                    if (hasKey) {
+                        descriptors.add(new ActionDescriptor("lock", id, name, "object", "Lock"));
+                    }
+                }
+            }
+
+            if (Boolean.TRUE.equals(props.get("carriable")) && !obj.isCarried()) {
+                descriptors.add(new ActionDescriptor("carry", id, name, "object", "Carry"));
+            }
+
+            if (Boolean.TRUE.equals(props.get("writable"))) {
+                boolean hasTool = inventory.values().stream().anyMatch(i -> i.hasGrant("writing_utensil"));
+                if (hasTool) descriptors.add(new ActionDescriptor("write", id, name, "object", "Write"));
+            }
+        }
+
+        for (String entityId : nearbyAgentIds) {
+            descriptors.add(new ActionDescriptor("speak", entityId, entityId, "agent", "Talk"));
+        }
+
+        descriptors.add(new ActionDescriptor("wait", "", "", "none", "Wait"));
+        return descriptors;
+    }
+
+    /**
      * Returns a list of human-readable legal action descriptions for a given actor.
      * Includes object interactions (filtered by affordance + inventory), speak
      * actions for nearby agents, and always includes "wait" as a fallback.
@@ -286,63 +390,9 @@ public class ActionResolver {
      */
     public List<String> legalActionsFor(String actorId, double actorX, double actorY,
                                         List<String> nearbyAgentIds) {
-        List<String> actions = new ArrayList<>();
-        Map<String, InventoryItem> inventory = inventoryByActor.getOrDefault(actorId, Map.of());
-
-        // Object interactions within range
-        for (WorldObjectInstance obj : objectInstances.values()) {
-            double dx = actorX - obj.getX();
-            double dy = actorY - obj.getY();
-            double distTiles = Math.sqrt(dx * dx + dy * dy) / TILE_SIZE;
-            if (distTiles > DEFAULT_INTERACTION_RANGE_TILES) continue;
-
-            Map<String, Object> props = mergedProperties(obj);
-
-            // inspect — always available on interactive objects
-            if (Boolean.TRUE.equals(props.get("interactive"))) {
-                actions.add("inspect(" + obj.getName() + ")");
-            }
-
-            // open/close
-            if (Boolean.TRUE.equals(props.get("can_open_close"))) {
-                if (!obj.isOpen()) {
-                    if (!obj.isLocked()) {
-                        actions.add("open(" + obj.getName() + ")");
-                    } else {
-                        boolean hasKey = inventory.values().stream()
-                                .anyMatch(i -> i.opensInstance(obj.getInstanceId()));
-                        if (hasKey) {
-                            actions.add("open(" + obj.getName() + ") [key required — held]");
-                        }
-                        // locked + no key: action not listed (legal action list enforces this)
-                    }
-                } else {
-                    actions.add("close(" + obj.getName() + ")");
-                }
-            }
-
-            // carry
-            if (Boolean.TRUE.equals(props.get("carriable")) && !obj.isCarried()) {
-                actions.add("carry(" + obj.getName() + ")");
-            }
-
-            // write — only if actor holds a writing_utensil
-            if (Boolean.TRUE.equals(props.get("writable"))) {
-                boolean hasTool = inventory.values().stream()
-                        .anyMatch(i -> i.hasGrant("writing_utensil"));
-                if (hasTool) actions.add("write(" + obj.getName() + ")");
-            }
-        }
-
-        // Speak actions for nearby agents/player
-        for (String entityId : nearbyAgentIds) {
-            actions.add("speak(" + entityId + ")");
-        }
-
-        // Always-available fallback
-        actions.add("wait");
-
-        return actions;
+        return legalDescriptorsFor(actorId, actorX, actorY, nearbyAgentIds).stream()
+                .map(d -> d.targetId.isEmpty() ? d.verb : d.verb + "(" + d.targetName + ")")
+                .collect(Collectors.toList());
     }
 
     // ── Utilities ─────────────────────────────────────────────────────────────

@@ -17,9 +17,22 @@ var speech_label: Label = null
 var _speech_timer: float = 0.0
 
 func _ready():
-	# Default appearance: diamond marker with white outline.
-	sprite.texture = _create_diamond_texture()
-	sprite.position = Vector2(16, 16)  # Draw in the center of the logical tile
+	var npc_tex = load("res://assets/sprites/generic_male.png") as Texture2D
+	var tile_px := 32.0
+	var bc := get_node_or_null("../../../BackendConnector")
+	if bc != null and bc.has_method("get_tile_size"):
+		tile_px = float(bc.get_tile_size())
+	if npc_tex:
+		sprite.texture = npc_tex
+		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		sprite.centered = true
+	else:
+		sprite.texture = _create_diamond_texture()
+	var d = maxf(float(sprite.texture.get_width()), float(sprite.texture.get_height()))
+	if d > 0.0:
+		var s = tile_px / d
+		sprite.scale = Vector2(s, s)
+	sprite.position = Vector2(16, 16)
 	label.position = Vector2(-24, -52)
 	label.add_theme_font_size_override("font_size", 12)
 	label.autowrap_mode = TextServer.AUTOWRAP_WORD

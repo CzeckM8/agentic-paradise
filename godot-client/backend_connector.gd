@@ -16,7 +16,6 @@ var initial_object_seed_enabled = true
 @onready var agents_container = get_node("../World/Agents")
 @onready var debug_label = get_node("../UI/DebugLabel")
 @onready var world_node = get_node("../World")
-@onready var world_camera = get_node("../World/Camera")
 @onready var dialogue_panel = get_node("../UI/DialoguePanel")
 @onready var dialogue_target_label = get_node("../UI/DialoguePanel/DialogueVBox/DialogueTargetLabel")
 @onready var dialogue_log = get_node("../UI/DialoguePanel/DialogueVBox/DialogueLog")
@@ -45,6 +44,7 @@ var last_runtime_request = {}
 var turn_request_in_flight = false
 var pending_move_action = {}
 var location_overlays: Node2D = null
+var floor_tiles_container: Node2D = null
 var object_overlays: Node2D = null
 var grid_overlay: Node2D = null
 var world_objects: Array = []
@@ -215,8 +215,18 @@ func _set_loading(visible: bool, message: String = ""):
 		if message != "" and loading_status_label != null:
 			loading_status_label.text = message
 
+func _apply_game_session_from_menu() -> void:
+	"""Apply name (and related session data) chosen in the main-menu flow."""
+	var session = get_node_or_null("/root/GameSession")
+	if session == null:
+		return
+	var n = str(session.player_name).strip_edges()
+	player_name = n if n != "" else "Player"
+	session.player_name = player_name
+
 func _ready():
 	print("Backend Connector initialized")
+	_apply_game_session_from_menu()
 	_refresh_debug_label()
 	_ensure_location_overlay_container()
 	_ensure_object_overlay_container()
@@ -378,7 +388,7 @@ func _initialize_new_world():
 	# Create the player character (await so bootstrap can lock input immediately after)
 	print("[INIT] Creating player character...")
 	await _create_player_async({
-		"name": "Player",
+		"name": player_name,
 		"location": "home",
 		"activity": "Looking around home",
 		"memories": ["I've arrived in this strange town.", "I should explore and meet the locals."]
@@ -810,17 +820,6 @@ func _get_default_object_type_definitions() -> Dictionary:
 			"interactionRadius": 40,
 			"tags": ["entrance", "pathing"]
 		},
-		# idle_zones are walkable floor markers
-		"idle_zone": {
-			"anchor": true,
-			"anchorKind": "idle_zone",
-			"portable": false,
-			"interactive": true,
-			"passable": true,
-			"interactionMode": "nearby",
-			"interactionRadius": 96,
-			"tags": ["ambient", "social"]
-		},
 		# work_spots (counters, bars) are solid — you work adjacent, not on top
 		"work_spot": {
 			"anchor": true,
@@ -871,17 +870,11 @@ func _get_default_object_type_definitions() -> Dictionary:
 
 func _get_default_world_objects() -> Array:
 	return [
-		# Street pathing and transitions
-		{"id":"street_idle_north","type":"idle_zone","name":"North Sidewalk Flow","x":900,"y":180,"location":"street","properties":{"zoneRadius":120,"pathingHint":true}},
-		{"id":"street_idle_central","type":"idle_zone","name":"Central Street Flow","x":900,"y":540,"location":"street","properties":{"zoneRadius":140,"pathingHint":true}},
-		{"id":"street_idle_south","type":"idle_zone","name":"South Sidewalk Flow","x":900,"y":980,"location":"street","properties":{"zoneRadius":120,"pathingHint":true}},
-
 		# Market
 		{"id":"market_entry_street","type":"entrance_anchor","name":"Market Entrance","x":600,"y":260,"location":"market","properties":{"linkedHint":"street","building":"market","transition_point":true,"locked":false,"passable":true}},
 		{"id":"market_counter","type":"work_spot","name":"Produce Counter","x":460,"y":200,"location":"market","properties":{"activity":["sell","buy","trade"],"adjacentPreferred":true,"passable":false,"height":"counter","flat_surface":true}},
 		{"id":"market_crates","type":"fixture","name":"Crate Stack","x":250,"y":300,"location":"market","properties":{"inspectable":true,"passable":false,"height":"medium","description":"A stack of wooden crates, some dented at the corners."}},
 		{"id":"market_notice_wall","type":"decor","name":"Market Notice Wall","x":120,"y":120,"location":"market","properties":{"writable":true,"graffiti":true,"passable":true,"height":"tall","has_writing":"Today's produce: fresh apples, potatoes, dried herbs. Haggling welcome."}},
-		{"id":"market_idle_zone","type":"idle_zone","name":"Market Browsing Zone","x":320,"y":260,"location":"market","properties":{"zoneRadius":100}},
 
 		# Tavern
 		{"id":"tavern_entry_street","type":"entrance_anchor","name":"Tavern Entrance","x":700,"y":230,"location":"tavern","properties":{"linkedHint":"street","building":"tavern","transition_point":true,"locked":false,"passable":true}},
@@ -889,7 +882,6 @@ func _get_default_world_objects() -> Array:
 		{"id":"tavern_table_a","type":"fixture","name":"Round Table A","x":830,"y":300,"location":"tavern","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"comfort":"worn but sturdy"}},
 		{"id":"tavern_table_b","type":"fixture","name":"Round Table B","x":1030,"y":320,"location":"tavern","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"comfort":"a bit wobbly"}},
 		{"id":"tavern_wall_sign","type":"decor","name":"Tavern Wall Sign","x":1140,"y":80,"location":"tavern","properties":{"stealable":true,"writable":true,"passable":true,"height":"tall","has_writing":"The Rusty Flagon — Est. Year 12. No credit. No exceptions."}},
-		{"id":"tavern_idle_zone","type":"idle_zone","name":"Tavern Common Zone","x":920,"y":260,"location":"tavern","properties":{"zoneRadius":110}},
 
 		# Coffee shop
 		{"id":"coffee_entry_street","type":"entrance_anchor","name":"Coffee Shop Entrance","x":1300,"y":210,"location":"coffee_shop","properties":{"linkedHint":"street","building":"coffee_shop","transition_point":true,"locked":false,"passable":true}},
@@ -897,27 +889,64 @@ func _get_default_world_objects() -> Array:
 		{"id":"coffee_register","type":"work_spot","name":"Register","x":1580,"y":140,"location":"coffee_shop","properties":{"activity":["charge","serve"],"passable":false,"height":"counter","flat_surface":true}},
 		{"id":"coffee_table","type":"fixture","name":"Window Table","x":1440,"y":290,"location":"coffee_shop","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"comfort":"comfortable","description":"A small round table by the window, with two chairs."}},
 		{"id":"coffee_bulletin","type":"decor","name":"Community Bulletin Board","x":1335,"y":95,"location":"coffee_shop","properties":{"writable":true,"noteBoard":true,"passable":true,"height":"tall","has_writing":"Lost cat — answers to Biscuit. Reward offered. Also: open mic night Friday."}},
-		{"id":"coffee_idle_zone","type":"idle_zone","name":"Coffee Lounge Zone","x":1520,"y":250,"location":"coffee_shop","properties":{"zoneRadius":90}},
 
 		# Town square
 		{"id":"square_stage","type":"fixture","name":"Public Stage","x":620,"y":760,"location":"town_square","properties":{"performable":true,"passable":false,"height":"low","flat_surface":true,"climbable":true,"description":"A raised wooden platform, scuffed from many performances."}},
 		{"id":"square_fountain","type":"fixture","name":"Fountain","x":780,"y":860,"location":"town_square","properties":{"landmark":true,"passable":false,"height":"medium","description":"A stone fountain, still running. Coins glint at the bottom."}},
 		{"id":"square_notice","type":"decor","name":"Public Notice Wall","x":980,"y":720,"location":"town_square","properties":{"writable":true,"graffiti":true,"passable":true,"height":"tall","has_writing":"Town meeting postponed. Curfew reminder: gates close at dusk."}},
-		{"id":"square_idle_zone","type":"idle_zone","name":"Town Square Gathering","x":760,"y":900,"location":"town_square","properties":{"zoneRadius":140}},
 
 		# Home
 		{"id":"home_entry_street","type":"entrance_anchor","name":"Home Entrance","x":224,"y":620,"location":"home","properties":{"linkedHint":"street","building":"home","transition_point":true,"locked":false,"passable":true}},
 		{"id":"home_bed","type":"work_spot","name":"Bedside","x":170,"y":860,"location":"home","properties":{"activity":["rest","sleep"],"passable":false,"height":"low","flat_surface":true,"climbable":true,"sittable":true,"comfort":"soft","description":"A modest bed with rumpled sheets."}},
 		{"id":"home_kitchen","type":"work_spot","name":"Kitchen Counter","x":250,"y":720,"location":"home","properties":{"activity":["cook","clean"],"passable":false,"height":"counter","flat_surface":true}},
 		{"id":"home_picture","type":"decor","name":"Framed Picture","x":120,"y":680,"location":"home","properties":{"stealable":true,"passable":true,"height":"low","description":"A faded painting of a countryside scene."}},
-		{"id":"home_idle_zone","type":"idle_zone","name":"Home Living Area","x":220,"y":800,"location":"home","properties":{"zoneRadius":90}},
 
 		# Carriable world items — can be picked up and placed
 		{"id":"item_pencil_market","type":"decor","name":"Pencil","x":470,"y":200,"location":"market","properties":{"carriable":true,"passable":true,"height":"low","tags":["writing_utensil","pen"],"description":"A short wooden pencil, worn to a nub."}},
 		{"id":"item_pencil_coffee","type":"decor","name":"Pencil","x":1345,"y":95,"location":"coffee_shop","properties":{"carriable":true,"passable":true,"height":"low","tags":["writing_utensil","pen"],"description":"A pencil left near the bulletin board."}},
 		{"id":"item_knife_tavern","type":"decor","name":"Pocket Knife","x":995,"y":145,"location":"tavern","properties":{"carriable":true,"passable":true,"height":"low","tags":["knife","blade","tool"],"description":"A folding knife with a worn wooden handle."}},
 		{"id":"item_coin_square","type":"decor","name":"Coin Purse","x":790,"y":870,"location":"town_square","properties":{"carriable":true,"passable":true,"height":"low","tags":["coins","currency","valuables"],"description":"A small leather coin purse, a few coins jingling inside."}},
-		{"id":"item_key_home","type":"decor","name":"House Key","x":240,"y":725,"location":"home","properties":{"carriable":true,"passable":true,"height":"low","tags":["key","unlock"],"description":"A brass door key on a simple ring."}}
+		{"id":"item_key_home","type":"decor","name":"House Key","x":240,"y":725,"location":"home","properties":{"carriable":true,"passable":true,"height":"low","tags":["key","unlock"],"opens":"home_entry_street","description":"A brass door key on a simple ring."}},
+
+		# ── Market extras ────────────────────────────────────────────────────────
+		{"id":"market_stall_b","type":"work_spot","name":"Dry Goods Stall","x":300,"y":200,"location":"market","properties":{"activity":["sell","buy","barter"],"passable":false,"height":"counter","flat_surface":true,"description":"A wooden stall piled with dried beans, grain sacks, and spices."}},
+		{"id":"market_table_a","type":"fixture","name":"Display Table","x":350,"y":300,"location":"market","properties":{"passable":false,"height":"medium","flat_surface":true,"description":"A rough-hewn table used to display today's produce."}},
+		{"id":"market_chair_a","type":"decor","name":"Stool","x":420,"y":350,"location":"market","properties":{"sittable":true,"passable":true,"height":"low","description":"A rickety three-legged stool behind the counter."}},
+		{"id":"market_barrel_a","type":"fixture","name":"Pickle Barrel","x":100,"y":380,"location":"market","properties":{"passable":false,"height":"medium","inspectable":true,"description":"A large barrel. It smells strongly of brine."}},
+		{"id":"market_barrel_b","type":"fixture","name":"Grain Barrel","x":160,"y":380,"location":"market","properties":{"passable":false,"height":"medium","inspectable":true,"description":"A barrel stuffed with rough-ground flour."}},
+		{"id":"item_basket_market","type":"decor","name":"Wicker Basket","x":260,"y":200,"location":"market","properties":{"carriable":true,"passable":true,"height":"low","tags":["container"],"description":"A wicker basket filled with bruised apples."}},
+
+		# ── Tavern extras ─────────────────────────────────────────────────────────
+		{"id":"tavern_table_c","type":"fixture","name":"Corner Table","x":750,"y":380,"location":"tavern","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"description":"A small corner table, sticky from years of spilled ale."}},
+		{"id":"tavern_chair_a","type":"decor","name":"Chair","x":800,"y":340,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair, one leg slightly shorter than the others."}},
+		{"id":"tavern_chair_b","type":"decor","name":"Chair","x":860,"y":260,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair."}},
+		{"id":"tavern_chair_c","type":"decor","name":"Chair","x":1060,"y":260,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair."}},
+		{"id":"tavern_chair_d","type":"decor","name":"Chair","x":1100,"y":350,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair."}},
+		{"id":"tavern_chair_e","type":"decor","name":"Chair","x":780,"y":420,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair beside the corner table."}},
+		{"id":"tavern_stool_a","type":"decor","name":"Barstool","x":920,"y":180,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A tall stool at the bar, the seat worn smooth."}},
+		{"id":"tavern_stool_b","type":"decor","name":"Barstool","x":1040,"y":180,"location":"tavern","properties":{"sittable":true,"passable":true,"height":"low","description":"A tall stool at the bar."}},
+
+		# ── Coffee shop extras ────────────────────────────────────────────────────
+		{"id":"coffee_table_b","type":"fixture","name":"Corner Table","x":1550,"y":280,"location":"coffee_shop","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"description":"A small round table tucked into the corner."}},
+		{"id":"coffee_chair_a","type":"decor","name":"Chair","x":1410,"y":330,"location":"coffee_shop","properties":{"sittable":true,"passable":true,"height":"low","description":"A cushioned chair by the window."}},
+		{"id":"coffee_chair_b","type":"decor","name":"Chair","x":1480,"y":330,"location":"coffee_shop","properties":{"sittable":true,"passable":true,"height":"low","description":"A cushioned chair by the window."}},
+		{"id":"coffee_chair_c","type":"decor","name":"Chair","x":1510,"y":320,"location":"coffee_shop","properties":{"sittable":true,"passable":true,"height":"low","description":"A chair at the corner table."}},
+		{"id":"coffee_chair_d","type":"decor","name":"Chair","x":1600,"y":320,"location":"coffee_shop","properties":{"sittable":true,"passable":true,"height":"low","description":"A chair at the corner table."}},
+		{"id":"coffee_shelf","type":"fixture","name":"Pastry Display","x":1630,"y":220,"location":"coffee_shop","properties":{"passable":false,"height":"counter","flat_surface":true,"description":"A glass-fronted case holding a few pastries and a wedge of hard cheese."}},
+
+		# ── Town square extras ────────────────────────────────────────────────────
+		{"id":"square_bench_a","type":"fixture","name":"Park Bench","x":550,"y":900,"location":"town_square","properties":{"sittable":true,"passable":false,"height":"low","description":"A weathered wooden bench. Good for watching the crowd."}},
+		{"id":"square_bench_b","type":"fixture","name":"Park Bench","x":970,"y":860,"location":"town_square","properties":{"sittable":true,"passable":false,"height":"low","description":"A weathered wooden bench near the fountain."}},
+		{"id":"square_table_a","type":"fixture","name":"Picnic Table","x":680,"y":1060,"location":"town_square","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"description":"A heavy stone picnic table, often used for card games."}},
+		{"id":"square_chair_a","type":"decor","name":"Chair","x":640,"y":1100,"location":"town_square","properties":{"sittable":true,"passable":true,"height":"low","description":"A folding wooden chair."}},
+		{"id":"square_chair_b","type":"decor","name":"Chair","x":720,"y":1100,"location":"town_square","properties":{"sittable":true,"passable":true,"height":"low","description":"A folding wooden chair."}},
+		{"id":"item_book_square","type":"decor","name":"Worn Journal","x":500,"y":800,"location":"town_square","properties":{"carriable":true,"passable":true,"height":"low","writable":true,"has_writing":"Belonged to someone — half the pages are torn out.","tags":["writing_utensil","book"],"description":"A battered journal with a cracked leather cover."}},
+
+		# ── Home extras ───────────────────────────────────────────────────────────
+		{"id":"home_table","type":"fixture","name":"Dining Table","x":200,"y":780,"location":"home","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"description":"A simple square table with a chipped surface."}},
+		{"id":"home_chair_a","type":"decor","name":"Chair","x":160,"y":810,"location":"home","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair at the table."}},
+		{"id":"home_chair_b","type":"decor","name":"Chair","x":240,"y":810,"location":"home","properties":{"sittable":true,"passable":true,"height":"low","description":"A plain wooden chair at the table."}},
+		{"id":"home_wardrobe","type":"fixture","name":"Wardrobe","x":310,"y":880,"location":"home","properties":{"passable":false,"height":"tall","inspectable":true,"description":"A tall wooden wardrobe. The door sticks a little."}}
 	]
 
 # LOCATION FUNCTIONS
@@ -1026,7 +1055,7 @@ func _apply_locations_from_response_data(response_data) -> bool:
 			}
 
 	print("Loaded %d locations with spatial data: %s" % [locations.size(), locations.keys()])
-	_redraw_location_overlays()
+	_redraw_floor_tiles()
 	_redraw_grid_overlay()
 	return true
 
@@ -1263,19 +1292,17 @@ func _create_player(player_data):
 	# Delegate to the async version but don't await it.
 	_create_player_async(player_data)
 
-func _attach_world_camera_to_player(player_nd: Node2D) -> void:
-	"""Reparent World/Camera under the player so it moves with grid position automatically."""
-	if world_camera == null or not is_instance_valid(world_camera) or player_nd == null:
+func _activate_player_camera(player_nd: Node2D) -> void:
+	"""Camera lives on the player scene; enable it once the node exists."""
+	if player_nd == null:
 		return
-	if world_camera.get_parent() == player_nd:
-		return
-	world_camera.reparent(player_nd, false)
-	if world_camera.has_method("reset_smoothing"):
-		world_camera.reset_smoothing()
-	if world_camera is Camera2D:
-		(world_camera as Camera2D).enabled = true
-		if (world_camera as Camera2D).has_method("make_current"):
-			(world_camera as Camera2D).make_current()
+	var cam = player_nd.get_node_or_null("Camera")
+	if cam is Camera2D:
+		cam.enabled = true
+		if cam.has_method("make_current"):
+			cam.make_current()
+		if cam.has_method("reset_smoothing"):
+			cam.reset_smoothing()
 
 func _create_player_async(player_data) -> void:
 	"""Async POST request to create a player character. Awaitable.
@@ -1289,9 +1316,9 @@ func _create_player_async(player_data) -> void:
 		player_node_instance.name = "Player"
 		agents_container.add_child(player_node_instance)
 		player_node = player_node_instance
+		player_node_instance.player_name = str(player_data.get("name", player_name))
 		print("Spawned player node: ", player_node_instance.name)
-		# Keep the view centered on the player: Camera2D follows as a child (avoids canvas/local space bugs).
-		_attach_world_camera_to_player(player_node_instance)
+		_activate_player_camera(player_node_instance)
 		# Small delay to let _ready() run on the new node
 		await get_tree().create_timer(0.1).timeout
 
@@ -1683,7 +1710,7 @@ func _show_object_summary_async(focus_world: Vector2) -> void:
 		if props is Dictionary and not bool(props.get("walkable", true)) and not bool(props.get("interactive", true)):
 			continue  # pure wall, skip
 		var ttype = str(t.get("type", ""))
-		if ttype == "wall" or ttype == "idle_zone":
+		if ttype == "wall":
 			continue
 		describable.append(t)
 
@@ -1781,7 +1808,7 @@ func _get_relational_context_for(skip_id: String, target: Dictionary) -> String:
 		if oid == skip_id or oid == "":
 			continue
 		var otype = str(obj.get("type", ""))
-		if otype == "wall" or otype == "entrance_anchor" or otype == "idle_zone":
+		if otype == "wall" or otype == "entrance_anchor":
 			continue
 		var opos = snap_to_tile(Vector2(float(obj.get("x", 0.0)), float(obj.get("y", 0.0))))
 		if world_to_tile(opos) == target_tile:
@@ -1970,7 +1997,19 @@ func _fetch_context_actions_async(player_id: String, player_position: Vector2, f
 	else:
 		targets = _collect_targets_near(player_position, 120.0)
 
-	var grouped_actions = _build_actions_grouped_by_target(targets)
+	# Primary: fetch server-authoritative action descriptors and build menu from them.
+	# Server computes affordances, range, key-lock binding, and carry-conflict in one pass.
+	# Fallback: if the server is unreachable or returns empty, build client-side as before.
+	var server_descriptors = await _fetch_player_legal_descriptors_async(player_id, player_position)
+	var grouped_actions: Array
+	if not server_descriptors.is_empty():
+		grouped_actions = _build_groups_from_server_descriptors(server_descriptors, player_position)
+	else:
+		grouped_actions = _build_actions_grouped_by_target(targets)
+		var server_legal = await _fetch_player_legal_actions_async(player_id, player_position)
+		if not server_legal.is_empty():
+			grouped_actions = _filter_grant_gated_actions(grouped_actions, server_legal)
+
 	context_actions_cache = grouped_actions
 	_render_grouped_context_actions(grouped_actions)
 
@@ -1981,7 +2020,7 @@ func _fetch_context_actions_async(player_id: String, player_position: Vector2, f
 			if not (t is Dictionary):
 				continue
 			var ttype = str(t.get("type", ""))
-			if ttype == "wall" or ttype == "idle_zone":
+			if ttype == "wall":
 				continue
 			var summary = _build_target_summary(t)
 			if summary != "":
@@ -1991,6 +2030,150 @@ func _fetch_context_actions_async(player_id: String, player_position: Vector2, f
 		context_action_status.text = ""
 
 	context_actions_request_in_flight = false
+
+func _fetch_player_legal_actions_async(player_id: String, player_position: Vector2) -> Dictionary:
+	"""Query server for legal actions at the player's current position.
+	Returns a Dictionary keyed by 'verb:targetId' → true for fast lookup.
+	Returns empty Dictionary on failure (caller falls back to local computation)."""
+	var http = HTTPRequest.new()
+	add_child(http)
+	var px = int(player_position.x)
+	var py = int(player_position.y)
+	var url = "%s/player/%s/legal_actions?x=%d&y=%d" % [backend_url, player_id.uri_encode(), px, py]
+	var err = http.request(url)
+	if err != OK:
+		http.queue_free()
+		return {}
+	var response = await http.request_completed
+	http.queue_free()
+	if response[1] != 200:
+		return {}
+	var json = JSON.new()
+	if json.parse(response[3].get_string_from_utf8()) != OK:
+		return {}
+	var data = json.data
+	if not (data is Array):
+		return {}
+	var result: Dictionary = {}
+	for entry in data:
+		if entry is Dictionary:
+			var verb = str(entry.get("verb", ""))
+			var target_id = str(entry.get("targetId", ""))
+			if verb != "":
+				result[verb + ":" + target_id] = true
+	return result
+
+func _fetch_player_legal_descriptors_async(player_id: String, player_position: Vector2) -> Array:
+	"""Fetch full action descriptors [{verb, targetId, targetName, targetKind, label}] from server.
+	Returns empty Array on failure — caller falls back to client-side action building."""
+	var http = HTTPRequest.new()
+	add_child(http)
+	var px = int(player_position.x)
+	var py = int(player_position.y)
+	var url = "%s/player/%s/legal_actions?x=%d&y=%d" % [backend_url, player_id.uri_encode(), px, py]
+	var err = http.request(url)
+	if err != OK:
+		http.queue_free()
+		return []
+	var response = await http.request_completed
+	http.queue_free()
+	if response[1] != 200:
+		return []
+	var json = JSON.new()
+	if json.parse(response[3].get_string_from_utf8()) != OK:
+		return []
+	var data = json.data
+	if not (data is Array):
+		return []
+	return data
+
+func _build_groups_from_server_descriptors(descriptors: Array, player_position: Vector2) -> Array:
+	"""Convert server legalDescriptorsFor() response into the grouped_actions structure
+	expected by _render_grouped_context_actions(). Groups actions by targetId."""
+	var by_target: Dictionary = {}
+	var order: Array = []  # preserve insertion order for stable menu ordering
+
+	for desc in descriptors:
+		if not (desc is Dictionary): continue
+		var verb = str(desc.get("verb", ""))
+		var target_id = str(desc.get("targetId", ""))
+		var target_name = str(desc.get("targetName", target_id))
+		var target_kind = str(desc.get("targetKind", "object"))
+		var label = str(desc.get("label", verb.capitalize()))
+		if verb == "wait": continue  # wait is always available; skip cluttering the menu
+
+		var action_type = "interact"
+		if verb == "speak" or verb == "talk": action_type = "speak"
+		elif verb == "attack": action_type = "attack"
+
+		var target_agent = ("object:" + target_id) if target_kind == "object" else target_id
+		var action_desc_text = "%s %s" % [verb, target_name]
+		var action = {
+			"label": label,
+			"actionType": action_type,
+			"targetKind": target_kind,
+			"targetId": target_id,
+			"targetName": target_name,
+			"distance": 0.0,
+			"hint": action_desc_text,
+			"payload": {
+				"targetAgent": target_agent,
+				"actionDescription": action_desc_text,
+				"flair": "action:%s" % verb
+			}
+		}
+
+		var group_key = target_id if target_id != "" else verb
+		if not by_target.has(group_key):
+			by_target[group_key] = {
+				"targetKind": target_kind,
+				"targetId": target_id,
+				"targetName": target_name,
+				"distance": 0.0,
+				"actions": []
+			}
+			order.append(group_key)
+		by_target[group_key]["actions"].append(action)
+
+	var result: Array = []
+	for key in order:
+		result.append(by_target[key])
+	return result
+
+func _filter_grant_gated_actions(groups: Array, server_legal: Dictionary) -> Array:
+	"""Remove grant-gated actions (unlock, lock, write, carry) that the server did not permit.
+	Non-grant-gated actions (inspect, talk, sit, climb, etc.) are kept as-is."""
+	const GRANT_GATED := ["unlock", "lock", "write", "carry"]
+	var filtered: Array = []
+	for group in groups:
+		if not (group is Dictionary):
+			filtered.append(group)
+			continue
+		var kind = str(group.get("targetKind", ""))
+		var target_id = str(group.get("targetId", ""))
+		var actions: Array = group.get("actions", [])
+		var kept: Array = []
+		for action in actions:
+			if not (action is Dictionary):
+				kept.append(action)
+				continue
+			var payload = action.get("payload", {})
+			var flair = str(payload.get("flair", ""))
+			# Extract action key from flair "action:verb"
+			var action_key = ""
+			if flair.begins_with("action:"):
+				action_key = flair.substr(7)
+			if action_key in GRANT_GATED:
+				# Only keep if server confirmed this verb+targetId is legal
+				var server_key = action_key + ":" + target_id
+				if not server_legal.has(server_key):
+					continue
+			kept.append(action)
+		if not kept.is_empty():
+			var g = group.duplicate(true)
+			g["actions"] = kept
+			filtered.append(g)
+	return filtered
 
 func _is_object_held(row: Dictionary) -> bool:
 	"""True when this world object is currently in someone's inventory."""
@@ -3394,7 +3577,7 @@ func _update_world(state):
 					"centerX": (loc_obj.get("minX", 0.0) + loc_obj.get("maxX", 100.0)) / 2.0,
 					"centerY": (loc_obj.get("minY", 0.0) + loc_obj.get("maxY", 100.0)) / 2.0
 				}
-		_redraw_location_overlays()
+		_redraw_floor_tiles()
 	elif state.has("locations"):
 		var locs = state.locations
 		for loc_obj in locs:
@@ -3410,7 +3593,7 @@ func _update_world(state):
 					"centerX": (loc_obj.get("minX", 0.0) + loc_obj.get("maxX", 100.0)) / 2.0,
 					"centerY": (loc_obj.get("minY", 0.0) + loc_obj.get("maxY", 100.0)) / 2.0
 				}
-		_redraw_location_overlays()
+		_redraw_floor_tiles()
 	
 	# Update debug info
 	if state.has("agents"):
@@ -4220,6 +4403,103 @@ func _ensure_location_overlay_container():
 		var tile_layer = world_node.get_node("TileMapLayer")
 		world_node.move_child(location_overlays, tile_layer.get_index() + 1)
 
+func _ensure_floor_tiles_container():
+	"""Create a world-space container for tiled floor sprites, drawn below all overlays."""
+	if world_node == null:
+		return
+
+	if world_node.has_node("FloorTiles"):
+		floor_tiles_container = world_node.get_node("FloorTiles") as Node2D
+		return
+
+	floor_tiles_container = Node2D.new()
+	floor_tiles_container.name = "FloorTiles"
+	floor_tiles_container.z_index = -10
+	world_node.add_child(floor_tiles_container)
+
+func _get_floor_texture_path(loc_type: String, loc_name: String) -> String:
+	"""Map a location type (and name fallback) to the appropriate floor sprite."""
+	var t = loc_type.to_lower()
+	var n = loc_name.to_lower()
+	if t in ["outside", "street", "road"] or n == "street" or n == "outside":
+		return "res://assets/floor_sprites/grass_floor.png"
+	if t == "tavern" or n == "tavern":
+		return "res://assets/floor_sprites/wood_floor_fine.png"
+	if t in ["cafe", "coffee", "cafe_shop"] or n.contains("coffee") or n.contains("cafe"):
+		return "res://assets/floor_sprites/tile_floor.png"
+	if t == "market" or n == "market":
+		return "res://assets/floor_sprites/stone_floor.png"
+	if t in ["public", "plaza", "park"] or n.contains("square") or n.contains("plaza"):
+		return "res://assets/floor_sprites/stone_floor_grassy.png"
+	if t in ["residential", "home", "house"] or n == "home":
+		return "res://assets/floor_sprites/wood_floor_pane.png"
+	return "res://assets/floor_sprites/stone_floor.png"
+
+func _redraw_floor_tiles():
+	"""Fill each location's bounds with a tiled floor sprite."""
+	if floor_tiles_container == null:
+		_ensure_floor_tiles_container()
+	if floor_tiles_container == null:
+		return
+
+	for child in floor_tiles_container.get_children():
+		child.queue_free()
+
+	# Separate outdoor (background) from enclosed so outdoor is drawn first.
+	var outdoor_locs: Array = []
+	var enclosed_locs: Array = []
+	for loc_name in locations.keys():
+		var loc = locations[loc_name]
+		if not (loc is Dictionary):
+			continue
+		var min_x = float(loc.get("minX", 0.0))
+		var max_x = float(loc.get("maxX", min_x))
+		var min_y = float(loc.get("minY", 0.0))
+		var max_y = float(loc.get("maxY", min_y))
+		if max_x <= min_x or max_y <= min_y:
+			continue
+		if _is_transit_location_name(loc_name, loc):
+			outdoor_locs.append(loc_name)
+		else:
+			enclosed_locs.append(loc_name)
+
+	for loc_name in outdoor_locs + enclosed_locs:
+		var loc = locations[loc_name]
+		var min_x = float(loc.get("minX", 0.0))
+		var max_x = float(loc.get("maxX", min_x))
+		var min_y = float(loc.get("minY", 0.0))
+		var max_y = float(loc.get("maxY", min_y))
+		var loc_type = str(loc.get("type", "generic"))
+		var tex_path = _get_floor_texture_path(loc_type, loc_name)
+		var tex = load(tex_path) as Texture2D
+		if tex == null:
+			continue
+
+		var w = max_x - min_x
+		var h = max_y - min_y
+		var tex_size = tex.get_size()
+		# Scale UVs so exactly 1 game tile (tile_size px) = 1 full texture repeat.
+		var uv_w = (w / tile_size) * tex_size.x
+		var uv_h = (h / tile_size) * tex_size.y
+
+		var floor_poly = Polygon2D.new()
+		floor_poly.texture = tex
+		floor_poly.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+		floor_poly.modulate = Color(1.0, 1.0, 1.0, 1.0)
+		floor_poly.polygon = PackedVector2Array([
+			Vector2(min_x, min_y),
+			Vector2(max_x, min_y),
+			Vector2(max_x, max_y),
+			Vector2(min_x, max_y)
+		])
+		floor_poly.uv = PackedVector2Array([
+			Vector2(0.0,  0.0),
+			Vector2(uv_w, 0.0),
+			Vector2(uv_w, uv_h),
+			Vector2(0.0,  uv_h)
+		])
+		floor_tiles_container.add_child(floor_poly)
+
 func _ensure_object_overlay_container():
 	"""Create a world-space container for object markers and zones."""
 	if world_node == null:
@@ -4245,7 +4525,7 @@ func _ensure_grid_overlay_container():
 
 	grid_overlay = Node2D.new()
 	grid_overlay.name = "GridOverlay"
-	grid_overlay.z_index = -3
+	grid_overlay.z_index = 10
 	world_node.add_child(grid_overlay)
 
 func _redraw_grid_overlay():
@@ -4380,22 +4660,22 @@ func _redraw_object_overlays():
 		var color = _get_object_type_color(object_type)
 		var radius = _get_object_marker_radius(object_type)
 
-		if object_type == "idle_zone":
-			var zone_radius = radius
-			if properties is Dictionary and properties.has("zoneRadius"):
-				zone_radius = float(properties.get("zoneRadius", radius))
-			var zone = _make_circle_polygon(tile_center, zone_radius, color, 0.12)
-			object_overlays.add_child(zone)
-
-			var zone_border = Line2D.new()
-			zone_border.width = 2.0
-			zone_border.default_color = Color(color.r, color.g, color.b, 0.75)
-			zone_border.closed = true
-			zone_border.points = _make_circle_points(tile_center, zone_radius, 24)
-			object_overlays.add_child(zone_border)
-
 		var los_alpha = 1.0 if in_los else 0.15
-		var marker = _make_object_marker(object_type, tile_center, radius, color)
+		var sprite_path = _get_object_sprite_path(obj)
+		var marker: Node2D
+		if sprite_path != "":
+			var tex = load(sprite_path) as Texture2D
+			if tex != null:
+				var sprite_node = Node2D.new()
+				var sprite = Sprite2D.new()
+				sprite.texture = tex
+				sprite.position = tile_center
+				var ts = tex.get_size()
+				sprite.scale = Vector2(tile_size / ts.x, tile_size / ts.y)
+				sprite_node.add_child(sprite)
+				marker = sprite_node
+		if marker == null:
+			marker = _make_object_marker(object_type, tile_center, radius, color)
 		marker.modulate.a = los_alpha
 		object_overlays.add_child(marker)
 
@@ -4411,6 +4691,46 @@ func _redraw_object_overlays():
 		label.add_theme_font_size_override("font_size", 10)
 		label.modulate = Color(0.98, 0.98, 0.98, 0.95)
 		object_overlays.add_child(label)
+
+func _get_object_sprite_path(obj: Dictionary) -> String:
+	"""Return res:// path to a sprite for this object, or "" to fall back to geometric marker."""
+	var otype = str(obj.get("type", "")).to_lower()
+	var oid   = str(obj.get("id",   "")).to_lower()
+	var oname = str(obj.get("name", "")).to_lower()
+	var loc   = str(obj.get("location", "")).to_lower()
+
+	if otype == "wall":
+		return "res://assets/objects/brick_wall.png"
+
+	if otype == "entrance_anchor":
+		if loc == "tavern":
+			return "res://assets/objects/tavern_door.png"
+		if loc == "coffee_shop":
+			return "res://assets/objects/coffee_shop_door.png"
+		if loc == "market":
+			return "res://assets/objects/market_door.png"
+		return "res://assets/objects/house_door.png"
+
+	if oid.contains("coffee_machine") or oname.contains("espresso"):
+		return "res://assets/objects/coffee_machine.png"
+	if oid.contains("register") or oname.contains("register"):
+		return "res://assets/objects/register.png"
+	if oname.contains("table") or oid.contains("table"):
+		return "res://assets/objects/table.png"
+	if oname.contains("chair") or oid.contains("chair") or oname.contains("stool") or oid.contains("stool"):
+		return "res://assets/objects/chair.png"
+	if oname.contains("bed") or oid.contains("bed") or oname.contains("bedside"):
+		return "res://assets/objects/bed.png"
+	if oname.contains("pencil") or oid.contains("pencil"):
+		return "res://assets/objects/pencil.png"
+	if (oname.contains("key") or oid.contains("key")) and not oname.contains("turkey"):
+		return "res://assets/objects/key.png"
+	if oname.contains("coin") or oid.contains("coin") or oname.contains("purse"):
+		return "res://assets/objects/coin_purse.png"
+	if oname.contains("knife") or oid.contains("knife") or oname.contains("blade"):
+		return "res://assets/objects/pocket_kinfe.png"
+
+	return ""
 
 func _make_object_marker(object_type: String, center: Vector2, radius: float, color: Color) -> Node2D:
 	var node = Node2D.new()
@@ -4463,8 +4783,6 @@ func _get_object_type_color(object_type: String) -> Color:
 	match object_type:
 		"entrance_anchor":
 			return Color(1.00, 0.57, 0.12)
-		"idle_zone":
-			return Color(0.16, 0.72, 1.00)
 		"work_spot":
 			return Color(1.00, 0.86, 0.18)
 		"decor":
@@ -4478,8 +4796,6 @@ func _get_object_marker_radius(object_type: String) -> float:
 	match object_type:
 		"entrance_anchor":
 			return 10.0
-		"idle_zone":
-			return 14.0
 		"work_spot":
 			return 8.0
 		"decor":

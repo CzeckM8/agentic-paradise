@@ -1,0 +1,290 @@
+[gd_scene format=3 uid="uid://c8ghx8s0qba7"]
+
+[ext_resource type="Texture2D" uid="uid://cmnk1cwwgcjn4" path="res://assets/images/paradise-background.png" id="1_2gov2"]
+[ext_resource type="Script" path="res://scripts/ui/create_menu.gd" id="2_script"]
+
+[sub_resource type="Environment" id="Environment_2gov2"]
+glow_enabled = true
+glow_intensity = 1.6
+glow_bloom = 0.14
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_ipday"]
+content_margin_left = 26.0
+content_margin_top = 26.0
+content_margin_right = 26.0
+content_margin_bottom = 26.0
+bg_color = Color(0, 0, 0, 0.5686275)
+border_width_left = 4
+border_width_top = 4
+border_width_right = 4
+border_width_bottom = 4
+border_color = Color(0.16470589, 0.9098039, 0.9411765, 1)
+corner_radius_top_left = 26
+corner_radius_top_right = 26
+corner_radius_bottom_right = 26
+corner_radius_bottom_left = 26
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_2gov2"]
+content_margin_left = 16.0
+content_margin_top = 10.0
+content_margin_right = 16.0
+content_margin_bottom = 10.0
+bg_color = Color(0, 0, 0, 0)
+border_width_left = 4
+border_width_top = 4
+border_width_right = 4
+border_width_bottom = 4
+border_color = Color(1, 0.2901961, 0.8352941, 1)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_dorr7"]
+content_margin_left = 16.0
+content_margin_top = 10.0
+content_margin_right = 16.0
+content_margin_bottom = 10.0
+bg_color = Color(0.6, 0.6, 0.6, 0)
+border_width_left = 4
+border_width_top = 4
+border_width_right = 4
+border_width_bottom = 4
+border_color = Color(1, 0.47843137, 0.92156863, 1)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_qc4q5"]
+content_margin_left = 18.0
+content_margin_top = 10.0
+content_margin_right = 18.0
+content_margin_bottom = 10.0
+bg_color = Color(0.6, 0.6, 0.6, 0.03529412)
+border_width_left = 3
+border_width_top = 3
+border_width_right = 3
+border_width_bottom = 3
+border_color = Color(0.3019608, 1, 1, 1)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_33tbc"]
+content_margin_left = 18.0
+content_margin_top = 10.0
+content_margin_right = 18.0
+content_margin_bottom = 10.0
+bg_color = Color(0.019607844, 0.101960786, 0.14117648, 0.8)
+border_width_left = 3
+border_width_top = 3
+border_width_right = 3
+border_width_bottom = 3
+border_color = Color(0.3019608, 1, 1, 1)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_0xa77"]
+content_margin_left = 18.0
+content_margin_top = 10.0
+content_margin_right = 18.0
+content_margin_bottom = 10.0
+bg_color = Color(0.039215688, 0.18039216, 0.21960784, 0.6509804)
+border_width_left = 3
+border_width_top = 3
+border_width_right = 3
+border_width_bottom = 3
+border_color = Color(0.54901963, 1, 1, 1)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_vlguu"]
+content_margin_left = 18.0
+content_margin_top = 10.0
+content_margin_right = 18.0
+content_margin_bottom = 10.0
+bg_color = Color(0.039215688, 0.18039216, 0.21960784, 0.6509804)
+border_width_left = 3
+border_width_top = 3
+border_width_right = 3
+border_width_bottom = 3
+border_color = Color(0.54901963, 1, 1, 1)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[node name="Control" type="Control" unique_id=1971784450]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("2_script")
+
+[node name="TextureRect" type="TextureRect" parent="." unique_id=3304982]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+texture = ExtResource("1_2gov2")
+expand_mode = 1
+stretch_mode = 6
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1531915143]
+environment = SubResource("Environment_2gov2")
+
+[node name="CenterContainer" type="CenterContainer" parent="." unique_id=1482782067]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="PanelContainer" type="PanelContainer" parent="CenterContainer" unique_id=415078010]
+custom_minimum_size = Vector2(1080, 660)
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_ipday")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="CenterContainer/PanelContainer" unique_id=2139272746]
+layout_mode = 2
+theme_override_constants/separation = 14
+
+[node name="title name" type="Label" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=1372579739]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.24705882, 0.1882353, 1)
+theme_override_colors/font_outline_color = Color(0.91764706, 0, 0.7607843, 1)
+theme_override_constants/outline_size = 2
+theme_override_font_sizes/font_size = 56
+text = "CREATE WORLD"
+horizontal_alignment = 1
+
+[node name="Control" type="Control" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=1049528696]
+custom_minimum_size = Vector2(0, 6)
+layout_mode = 2
+
+[node name="World Name" type="Label" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=1573481669]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 28
+text = "World Name"
+horizontal_alignment = 1
+
+[node name="world name label" type="LineEdit" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=1367786578]
+custom_minimum_size = Vector2(620, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.875, 0.875, 0.875, 1)
+theme_override_font_sizes/font_size = 22
+theme_override_styles/normal = SubResource("StyleBoxFlat_2gov2")
+theme_override_styles/focus = SubResource("StyleBoxFlat_dorr7")
+
+[node name="agression level label" type="Label" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=865611196]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 28
+text = "Agression Level"
+horizontal_alignment = 1
+
+[node name="HBoxContainer" type="HBoxContainer" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=685707196]
+layout_mode = 2
+theme_override_constants/separation = 18
+alignment = 1
+
+[node name="low button" type="Button" parent="CenterContainer/PanelContainer/VBoxContainer/HBoxContainer" unique_id=526704104]
+custom_minimum_size = Vector2(120, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.875, 0.875, 0.875, 1)
+theme_override_font_sizes/font_size = 18
+theme_override_styles/normal = SubResource("StyleBoxFlat_qc4q5")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_33tbc")
+theme_override_styles/hover = SubResource("StyleBoxFlat_0xa77")
+theme_override_styles/focus = SubResource("StyleBoxFlat_vlguu")
+text = "Low"
+
+[node name="medium button" type="Button" parent="CenterContainer/PanelContainer/VBoxContainer/HBoxContainer" unique_id=987785833]
+custom_minimum_size = Vector2(120, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.875, 0.875, 0.875, 1)
+theme_override_font_sizes/font_size = 18
+theme_override_styles/normal = SubResource("StyleBoxFlat_qc4q5")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_33tbc")
+theme_override_styles/hover = SubResource("StyleBoxFlat_0xa77")
+theme_override_styles/focus = SubResource("StyleBoxFlat_vlguu")
+text = "Medium"
+
+[node name="high button" type="Button" parent="CenterContainer/PanelContainer/VBoxContainer/HBoxContainer" unique_id=2042340855]
+custom_minimum_size = Vector2(120, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.875, 0.875, 0.875, 1)
+theme_override_font_sizes/font_size = 18
+theme_override_styles/normal = SubResource("StyleBoxFlat_qc4q5")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_33tbc")
+theme_override_styles/hover = SubResource("StyleBoxFlat_0xa77")
+theme_override_styles/focus = SubResource("StyleBoxFlat_vlguu")
+text = "High"
+
+[node name="Scenario Label" type="Label" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=1362699719]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 28
+text = "Scenario"
+horizontal_alignment = 1
+
+[node name="HBoxContainer2" type="HBoxContainer" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=841190436]
+layout_mode = 2
+theme_override_constants/separation = 18
+alignment = 1
+
+[node name="Everyday button" type="Button" parent="CenterContainer/PanelContainer/VBoxContainer/HBoxContainer2" unique_id=1879278240]
+custom_minimum_size = Vector2(180, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.875, 0.875, 0.875, 1)
+theme_override_font_sizes/font_size = 18
+theme_override_styles/normal = SubResource("StyleBoxFlat_qc4q5")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_33tbc")
+theme_override_styles/hover = SubResource("StyleBoxFlat_0xa77")
+theme_override_styles/focus = SubResource("StyleBoxFlat_vlguu")
+text = "Everyday"
+
+[node name="Stress button" type="Button" parent="CenterContainer/PanelContainer/VBoxContainer/HBoxContainer2" unique_id=187593667]
+custom_minimum_size = Vector2(180, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.875, 0.875, 0.875, 1)
+theme_override_font_sizes/font_size = 18
+theme_override_styles/normal = SubResource("StyleBoxFlat_qc4q5")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_33tbc")
+theme_override_styles/hover = SubResource("StyleBoxFlat_0xa77")
+theme_override_styles/focus = SubResource("StyleBoxFlat_vlguu")
+text = "Stress"
+
+[node name="generate button" type="Button" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=1450403216]
+custom_minimum_size = Vector2(620, 78)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.875, 0.875, 0.875, 1)
+theme_override_font_sizes/font_size = 30
+theme_override_styles/normal = SubResource("StyleBoxFlat_qc4q5")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_33tbc")
+theme_override_styles/hover = SubResource("StyleBoxFlat_0xa77")
+theme_override_styles/focus = SubResource("StyleBoxFlat_vlguu")
+text = "Generate"
+
+[node name="back button" type="Button" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=1389538808]
+custom_minimum_size = Vector2(620, 78)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.875, 0.875, 0.875, 1)
+theme_override_font_sizes/font_size = 30
+theme_override_styles/normal = SubResource("StyleBoxFlat_qc4q5")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_33tbc")
+theme_override_styles/hover = SubResource("StyleBoxFlat_0xa77")
+theme_override_styles/focus = SubResource("StyleBoxFlat_vlguu")
+text = "Back"

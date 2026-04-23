@@ -1,7 +1,6 @@
 [gd_scene format=3 uid="uid://dpsdohc4swhjh"]
 
 [ext_resource type="Script" uid="uid://c6iv1qo62j6d6" path="res://backend_connector.gd" id="1_ig7tw"]
-[ext_resource type="Script" uid="uid://beywxueyfrsuu" path="res://camera.gd" id="2_0xm2m"]
 
 [node name="Main" type="Node2D" unique_id=392394917]
 
@@ -13,9 +12,6 @@ script = ExtResource("1_ig7tw")
 [node name="TileMapLayer" type="TileMapLayer" parent="World" unique_id=1170288421]
 
 [node name="Agents" type="Node2D" parent="World" unique_id=1979780849]
-
-[node name="Camera" type="Camera2D" parent="World" unique_id=940159086]
-script = ExtResource("2_0xm2m")
 
 [node name="UI" type="CanvasLayer" parent="." unique_id=220146467]
 
@@ -41,28 +37,28 @@ Right-click: Context actions for object/entity
 F: Open inventory
 Q: Attack nearby agents
 
-Blue circle = Player
-Diamond markers = NPCs"
+Your avatar = selected sprite
+NPCs = townfolk sprite"
 
 [node name="DialoguePanel" type="Panel" parent="UI" unique_id=1317299073]
+modulate = Color(1, 1, 1, 0.72)
 clip_contents = true
-visible = true
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
 offset_left = 10.0
 offset_top = -250.0
 offset_right = 560.0
 offset_bottom = -10.0
-anchor_top = 1.0
-anchor_bottom = 1.0
-modulate = Color(1, 1, 1, 0.72)
 
 [node name="DialogueVBox" type="VBoxContainer" parent="UI/DialoguePanel" unique_id=2127056565]
 layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
 offset_left = 10.0
 offset_top = 10.0
 offset_right = -10.0
 offset_bottom = -10.0
-anchor_right = 1.0
-anchor_bottom = 1.0
 
 [node name="DialogueTargetLabel" type="Label" parent="UI/DialoguePanel/DialogueVBox" unique_id=14443351]
 layout_mode = 2
@@ -72,10 +68,7 @@ text = "Talking to: (none)"
 custom_minimum_size = Vector2(0, 90)
 layout_mode = 2
 size_flags_vertical = 3
-scroll_active = true
 scroll_following = true
-autowrap_mode = 3
-fit_content = false
 
 [node name="DialogueInputRow" type="HBoxContainer" parent="UI/DialoguePanel/DialogueVBox" unique_id=576388621]
 layout_mode = 2
@@ -131,7 +124,7 @@ layer = 10
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-color = Color(0.05, 0.05, 0.1, 0.88)
+color = Color(0.05, 0.05, 0.1, 1)
 
 [node name="VBox" type="VBoxContainer" parent="UI/LoadingOverlay" unique_id=65599127]
 anchors_preset = 8
