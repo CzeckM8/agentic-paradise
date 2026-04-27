@@ -41,36 +41,25 @@ public class MemoryStream {
      * @return
      */
     public List<Memory> getRelevantMemories(String query, int minImportance) {
-	// score, memory index
-	Map<Double, Integer> scores = new HashMap<Double, Integer>();
-
-	for (Memory memory : memories) {
+	// Build (score, originalIndex) pairs — avoids HashMap key collisions when
+	// multiple memories share the same score value.
+	List<double[]> scored = new ArrayList<>();
+	for (int i = 0; i < memories.size(); i++) {
+	    Memory memory = memories.get(i);
 	    if (memory.getImportance() >= minImportance) {
-		double score = memory.getScore(query);
-		scores.put(score, memories.indexOf(memory));
+		scored.add(new double[]{memory.getScore(query), i});
 	    }
 	}
 
-	List<Double> keys = new ArrayList<Double>(scores.keySet());
-	Collections.sort(keys);
+	// Sort by score descending so the top entries are first
+	scored.sort((a, b) -> Double.compare(b[0], a[0]));
 
-	List<Integer> indices = scores.values().stream().collect(Collectors.toList());
-
-	if (scores.size() > 3) {
-	    double first = keys.get(keys.size() - 1);
-	    double second = keys.get(keys.size() - 2);
-	    double third = keys.get(keys.size() - 3);
-
-	    indices = List.of(scores.get(first), scores.get(second), scores.get(third));
+	int limit = Math.min(3, scored.size());
+	List<Memory> result = new ArrayList<>(limit);
+	for (int i = 0; i < limit; i++) {
+	    result.add(memories.get((int) scored.get(i)[1]));
 	}
-
-	List<Memory> memCopies = new ArrayList<Memory>();
-
-	for (int index : indices) {
-	    memCopies.add(memories.get(index));
-	}
-
-	return memCopies;
+	return result;
     }
 
     public List<Memory> getUnweightedMemories() {
