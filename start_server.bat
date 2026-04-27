@@ -41,7 +41,7 @@ if defined LLM_MODEL (
 
 echo Starting Smallville on port %SERVER_PORT%...
 break > "%LATESTLOG%"
-call mvn -q -DskipTests exec:java -Dexec.mainClass=io.github.nickm980.smallville.Smallville -Dexec.args="--api-key o --port %SERVER_PORT%" -Dexec.jvmArgs="%JAVA_OPTS%" >> "%LATESTLOG%" 2>&1
+call mvn -q -DskipTests exec:java -Dexec.mainClass=io.github.nickm980.smallville.Smallville -Dexec.args="--api-key o --port %SERVER_PORT%" %JAVA_OPTS% >> "%LATESTLOG%" 2>&1
 copy /Y "%LATESTLOG%" "%LOGFILE%" >nul
 
 echo.
