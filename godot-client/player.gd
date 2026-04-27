@@ -13,6 +13,8 @@ var action_locked = false
 var lock_reason = ""
 var inventory = []
 var stress_level = 0.5  # 0.0 to 1.0
+var health: int = 100
+var is_incapacitated: bool = false
 
 # Hold-to-move (Stoneshard/Elin style)
 var held_move_dir = Vector2.ZERO
@@ -27,7 +29,7 @@ var action_cooldown = 0.0
 var action_cooldown_time = 1.0  # 1 second between actions
 var action_feedback_timer = 0.0
 var action_feedback_duration = 0.3  # Brief visual feedback duration
-var interaction_range = 96.0
+var interaction_range = 160.0
 
 # Reference to backend connector
 var backend_connector = null
@@ -194,7 +196,7 @@ func _input(event):
 			elif event.keycode == KEY_Q:
 				_try_attack_nearby()
 				action_taken = true
-			
+
 			if action_taken:
 				action_cooldown = action_cooldown_time
 				# Visual feedback for action
@@ -360,45 +362,38 @@ func _open_inventory_panel():
 		backend_connector.open_inventory_panel()
 
 func _try_attack_nearby():
-	"""Try to attack nearby agents"""
-	if backend_connector:
-		var nearby_agents = _get_nearby_agents()
-		if nearby_agents.size() > 0:
-			var target_agent = nearby_agents[0]  # Attack first nearby agent
-			
-			backend_connector.enqueue_player_action(
-				player_name,
-				"attack",
-				target_agent,
-				"",  # no target location
-				position.x, position.y,
-				"Attacking " + target_agent,
-				"",  # no speak text
-				0.8,  # high intensity
-				""  # no item
-			)
-			
-			current_activity = "attacking " + target_agent
-			_update_label()
-			
-			print("Player attacking: ", target_agent)
-		else:
-			print("No nearby agents to attack")
+	"""Quick-attack the nearest agent (Q key shortcut — always sends 'attack')."""
+	if backend_connector == null:
+		return
+	var nearby_agents = _get_nearby_agents()
+	if nearby_agents.is_empty():
+		print("No nearby agents to attack")
+		return
+	var target_agent = nearby_agents[0]
+	backend_connector.enqueue_player_action(
+		player_name,
+		"attack",
+		target_agent,
+		"",
+		position.x, position.y,
+		"Attacking " + target_agent,
+		"", 0.8, ""
+	)
+	current_activity = "attacking " + target_agent
+	_update_label()
+	print("Player attacking: ", target_agent)
 
 func _get_nearby_agents() -> Array:
 	"""Get nearby agents in same location and within interaction range, nearest first."""
 	var candidates = []
 	if backend_connector:
-		var all_agents = backend_connector.agent_nodes.keys()
-		for agent_name in all_agents:
-			if agent_name != player_name:
-				var agent_pos = backend_connector.get_agent_position(agent_name)
-				if agent_pos.get("location") == current_location:
-					var ax = float(agent_pos.get("x", position.x))
-					var ay = float(agent_pos.get("y", position.y))
-					var distance = position.distance_to(Vector2(ax, ay))
-					if distance <= interaction_range:
-						candidates.append({"name": agent_name, "distance": distance})
+		for agent_name in backend_connector.agent_nodes.keys():
+			if str(agent_name) == player_name:
+				continue
+			if backend_connector._is_agent_within_dialogue_range(str(agent_name)):
+				var live_pos = backend_connector._get_live_entity_position(str(agent_name))
+				var dist = position.distance_to(live_pos) if live_pos != Vector2.ZERO else 999999.0
+				candidates.append({"name": agent_name, "distance": dist})
 
 	if candidates.is_empty():
 		return []
@@ -420,6 +415,10 @@ func update_from_backend(data: Dictionary, _location_map: Dictionary, force_posi
 	current_activity = data.get("activity", current_activity)
 	current_location = data.get("location", current_location)
 	stress_level = data.get("stress", 0.5)
+	health = int(data.get("health", 100))
+	is_incapacitated = bool(data.get("incapacitated", false))
+	if is_incapacitated:
+		current_activity = "incapacitated"
 
 	var allow_position_sync = force_position_from_server
 	if not allow_position_sync and backend_connector and backend_connector.has_method("should_sync_player_position_from_backend"):
@@ -466,23 +465,31 @@ func _update_label():
 	var location_text = current_location
 	if backend_connector:
 		location_text = backend_connector.get_location_display_name(current_location)
-	label.text = "%s\n%s\n@ %s\nStress: %.1f" % [
-		player_name, 
-		current_activity, 
+	var health_bar = ""
+	if health < 100:
+		var filled = int(health / 10.0)
+		health_bar = "\n[" + "█".repeat(filled) + "░".repeat(10 - filled) + "] " + str(health)
+	label.text = "%s\n%s\n@ %s\nStress: %.1f%s" % [
+		player_name,
+		current_activity,
 		location_text,
-		stress_level * 100
+		stress_level * 100,
+		health_bar
 	]
 
 func _update_appearance():
-	"""Change color based on stress level"""
+	"""Change color based on health and stress level"""
+	if is_incapacitated:
+		sprite.modulate = Color(0.3, 0.3, 0.3, 0.6)
+		return
+	if health <= 30:
+		sprite.modulate = Color(1.0, 0.4, 0.0, 1.0)  # orange - critically injured
+		return
 	if stress_level < 0.3:
-		# Low stress - green/calm
 		sprite.modulate = Color.GREEN
 	elif stress_level < 0.7:
-		# Medium stress - yellow
 		sprite.modulate = Color.YELLOW
 	else:
-		# High stress - red/agitated
 		sprite.modulate = Color.RED
 
 func _apply_player_sprite_texture() -> void:

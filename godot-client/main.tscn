@@ -117,6 +117,56 @@ size_flags_vertical = 3
 layout_mode = 2
 text = "Close"
 
+[node name="PlayerHUD" type="VBoxContainer" parent="UI" unique_id=987654321]
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = -300.0
+offset_right = 215.0
+offset_bottom = -257.0
+
+[node name="HealthLabel" type="Label" parent="UI/PlayerHUD" unique_id=123456789]
+layout_mode = 2
+theme_override_font_sizes/font_size = 12
+text = "HP: 100 / 100"
+
+[node name="HealthBar" type="ProgressBar" parent="UI/PlayerHUD" unique_id=246813579]
+custom_minimum_size = Vector2(195, 18)
+layout_mode = 2
+value = 100.0
+show_percentage = false
+
+[node name="ActionLogPanel" type="Panel" parent="UI" unique_id=334455667]
+modulate = Color(1, 1, 1, 0.78)
+clip_contents = true
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -345.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = 280.0
+
+[node name="ActionLogVBox" type="VBoxContainer" parent="UI/ActionLogPanel" unique_id=112233445]
+layout_mode = 0
+offset_left = 8.0
+offset_top = 5.0
+offset_right = 327.0
+offset_bottom = 265.0
+
+[node name="ActionLogTitle" type="Label" parent="UI/ActionLogPanel/ActionLogVBox" unique_id=223344556]
+layout_mode = 2
+theme_override_font_sizes/font_size = 11
+text = "— Action Log —"
+horizontal_alignment = 1
+
+[node name="ActionLogText" type="RichTextLabel" parent="UI/ActionLogPanel/ActionLogVBox" unique_id=445566778]
+layout_mode = 2
+size_flags_vertical = 3
+scroll_following = true
+theme_override_font_sizes/normal_font_size = 10
+bbcode_enabled = true
+
 [node name="LoadingOverlay" type="CanvasLayer" parent="UI" unique_id=684617188]
 layer = 10
 

@@ -7,8 +7,9 @@ var runtime_awareness_radius = 20.0  # tile Manhattan distance
 var auto_start_backend = true
 var backend_wait_attempts = 180  # up to 90s for cold JVM + model startup
 var backend_wait_interval = 0.5
+const POLL_INTERVAL_SEC = 5.0  # How often to poll between player turns (NPC autonomous activity)
 var tile_size = 32.0
-var dialogue_interaction_tiles = 3
+var dialogue_interaction_tiles = 5
 var initial_generated_agent_count = 1
 var initial_object_seed_enabled = true
 
@@ -29,6 +30,10 @@ var initial_object_seed_enabled = true
 @onready var context_action_close_button = get_node("../UI/ContextActionPanel/ActionVBox/ActionCloseButton")
 @onready var loading_overlay = get_node("../UI/LoadingOverlay")
 @onready var loading_status_label = get_node("../UI/LoadingOverlay/VBox/Status")
+@onready var player_health_label = get_node("../UI/PlayerHUD/HealthLabel")
+@onready var player_health_bar = get_node("../UI/PlayerHUD/HealthBar")
+@onready var action_log_text: RichTextLabel = get_node_or_null("../UI/ActionLogPanel/ActionLogVBox/ActionLogText")
+var _health_fill_style: StyleBoxFlat = null
 
 # Agent and Player scenes to instantiate
 var agent_scene = preload("res://agent.tscn")
@@ -60,12 +65,16 @@ var pending_context_followup_action: Dictionary = {}
 var object_interaction_in_last_turn = false
 var carry_action_in_last_turn = false
 var player_has_local_movement = false
+var _force_next_player_position_sync: bool = false  # set true after tackle so server position overwrites client
+var _game_paused: bool = false
+var _pause_overlay: Control = null
 var last_conversation_signature = ""
 ## Prevents re-appending the same server dialog line every /turn (full conversation history is replayed).
 var _dialogue_signatures_seen: Dictionary = {}
 var entity_anchors: Dictionary = {}  # name -> Vector2 live node position
 var debug_header_text = "Connecting to backend..."
 var mouse_tile_debug_text = " | Mouse tile: (--, --)"
+var llm_model_name = ""
 var carried_object_id = ""
 var write_panel: Panel = null
 var write_panel_label: Label = null
@@ -132,12 +141,12 @@ var property_action_rules: Dictionary = {
 # "targetKinds" restricts which target categories get this action.
 var subject_property_rules: Dictionary = {
 	"has_arms": [
-		{"actionKey": "punch", "label": "Punch", "actionType": "attack",   "description": "Punching",  "targetKinds": ["entity"]},
+		{"actionKey": "punch", "label": "Punch", "actionType": "punch",    "description": "Punching",  "targetKinds": ["entity"]},
 		{"actionKey": "shove", "label": "Shove", "actionType": "attack",   "description": "Shoving",   "targetKinds": ["entity"]},
 		{"actionKey": "grab",  "label": "Grab",  "actionType": "interact", "description": "Grabbing",  "targetKinds": ["entity"]},
 	],
 	"has_legs": [
-		{"actionKey": "kick",  "label": "Kick",  "actionType": "attack",   "description": "Kicking",   "targetKinds": ["entity"]},
+		{"actionKey": "kick",  "label": "Kick",  "actionType": "kick",     "description": "Kicking",   "targetKinds": ["entity"]},
 	],
 }
 
@@ -233,6 +242,8 @@ func _ready():
 	_ensure_grid_overlay_container()
 	_wire_dialogue_ui()
 	_wire_context_action_ui()
+	_create_pause_overlay()
+	_init_health_hud()
 	_set_loading(true, "Connecting to server...")
 
 	var backend_ready = await _wait_for_backend_ready()
@@ -303,7 +314,15 @@ func _ping_backend() -> bool:
 	var response = await http.request_completed
 	http.queue_free()
 	var response_code = response[1]
-	return response_code == 200
+	if response_code == 200:
+		var body = response[3]
+		var json = JSON.new()
+		if json.parse(body.get_string_from_utf8()) == OK:
+			var data = json.get_data()
+			if data is Dictionary and data.has("model"):
+				llm_model_name = str(data["model"])
+		return true
+	return false
 
 func _start_backend_server():
 	"""Start the Java backend via start_server.bat, resolved relative to the project root."""
@@ -406,6 +425,7 @@ func _generate_agents_async(count: int) -> int:
 	"""Generate initial NPCs via backend LLM pipeline. Returns created agent count."""
 	var http = HTTPRequest.new()
 	add_child(http)
+	http.timeout = 45.0  # LLM generation can be slow; 45s cap so init doesn't hang
 	var headers = ["Content-Type: application/json"]
 	var payload = {
 		"count": clamp(count, 1, 3),
@@ -714,6 +734,7 @@ func _seed_building_wall_tiles(seeded_objects: Array) -> void:
 					"location": loc_name,
 					"properties": {
 						"interactive": true,
+						"passable": false,
 						"walkable": false,
 						"writable": true,
 						"transparent": false,
@@ -1155,7 +1176,7 @@ func _is_object_blocking_los(props: Dictionary) -> bool:
 ## Supercover Bresenham LOS — checks every cell the ray passes through,
 ## including both corner cells on diagonal steps (no tunneling through corners).
 ## start tile is excluded; end tile is NOT blocked (you can see things ON a wall tile).
-var los_vision_radius_tiles: int = 10
+var los_vision_radius_tiles: int = 70
 
 func has_line_of_sight(from_world: Vector2, to_world: Vector2) -> bool:
 	var ft = world_to_tile(from_world)
@@ -1368,11 +1389,13 @@ func _refresh_debug_label() -> void:
 	debug_label.text = debug_header_text + mouse_tile_debug_text
 
 func set_runtime_debug_header(npc_count: int, player_count: int, location_count: int, simulation_time: String) -> void:
-	debug_header_text = "NPCs: %d | Player: %d | Locations: %d | Time: %s" % [
+	var model_label = (" | Model: " + llm_model_name) if llm_model_name != "" else ""
+	debug_header_text = "NPCs: %d | Player: %d | Locations: %d | Time: %s%s" % [
 		npc_count,
 		player_count,
 		location_count,
-		simulation_time
+		simulation_time,
+		model_label
 	]
 	_refresh_debug_label()
 
@@ -1426,6 +1449,36 @@ func _wire_context_action_ui():
 		context_action_close_button.pressed.connect(close_context_action_panel)
 	if context_action_panel != null:
 		context_action_panel.visible = false
+
+func _init_health_hud() -> void:
+	if player_health_bar == null: return
+	var bg_style = StyleBoxFlat.new()
+	bg_style.bg_color = Color(0.12, 0.12, 0.12, 0.85)
+	player_health_bar.add_theme_stylebox_override("background", bg_style)
+	_health_fill_style = StyleBoxFlat.new()
+	_health_fill_style.bg_color = Color(0.2, 0.8, 0.2)
+	player_health_bar.add_theme_stylebox_override("fill", _health_fill_style)
+	if player_health_label != null:
+		player_health_label.add_theme_color_override("font_color", Color(0.96, 0.96, 0.96))
+
+func _sync_player_health_hud() -> void:
+	if player_node == null: return
+	var hp: int = player_node.health
+	if player_health_label != null:
+		player_health_label.text = "HP: %d / 100" % hp
+	if player_health_bar != null:
+		player_health_bar.value = float(hp)
+	if _health_fill_style != null:
+		_health_fill_style.bg_color = (
+			Color(0.2, 0.78, 0.2) if hp > 60 else
+			(Color(0.9, 0.68, 0.1) if hp > 30 else Color(0.88, 0.18, 0.18))
+		)
+
+func _append_action_log(entry: String) -> void:
+	if action_log_text == null:
+		return
+	var timestamp = Time.get_time_string_from_system().substr(0, 5)
+	action_log_text.append_text("[color=#aaaaaa][%s][/color] %s\n" % [timestamp, entry])
 
 func _create_write_panel() -> void:
 	"""Build the write-text modal panel programmatically."""
@@ -1552,6 +1605,32 @@ func open_inventory_panel() -> void:
 		player_node.set_action_lock(true, "inventory")
 	await _fetch_inventory_async(player_name)
 
+func _refresh_player_inventory_silent() -> void:
+	"""Silently update player_node.inventory from the server without opening any UI.
+	Called after carry/throw/place actions once the server has had time to process them."""
+	if player_node == null:
+		return
+	var http = HTTPRequest.new()
+	add_child(http)
+	var endpoint = "%s/player/%s" % [backend_url, player_name.uri_encode()]
+	var err = http.request(endpoint)
+	if err != OK:
+		http.queue_free()
+		return
+	var response = await http.request_completed
+	http.queue_free()
+	if response[1] != 200:
+		return
+	var json = JSON.new()
+	if json.parse(response[3].get_string_from_utf8()) != OK:
+		return
+	var payload = json.data
+	if not (payload is Dictionary):
+		return
+	var inv_objects: Array = payload.get("inventoryObjects", [])
+	var inv_ids: Array = payload.get("inventory", [])
+	player_node.inventory = inv_objects.duplicate() if not inv_objects.is_empty() else inv_ids.duplicate()
+
 func _fetch_inventory_async(player_id: String) -> void:
 	_clear_context_action_buttons()
 	var http = HTTPRequest.new()
@@ -1670,19 +1749,17 @@ func open_context_action_panel_at(world_focus: Vector2) -> void:
 	context_actions_request_in_flight = true
 
 	var dist = tile_manhattan_distance_from_world(player_node.position, context_last_click_world)
-	# Observe/inspect is available within 2 tiles; all other actions require adjacency (≤1).
-	# Beyond 2 tiles show a read-only summary only.
-	var in_action_range = dist <= 2
+	# Actions available within dialogue_interaction_tiles; beyond that show read-only summary.
+	var in_action_range = dist <= dialogue_interaction_tiles
 
 	if not in_action_range:
 		# Out of reach — show a read-only summary instead of an action menu.
 		await _show_object_summary_async(context_last_click_world)
 	else:
-		var focus_tile = world_to_tile(context_last_click_world)
 		if context_action_panel != null:
 			context_action_panel.visible = true
 		if context_action_title != null:
-			context_action_title.text = "Actions @ tile (%d, %d)" % [focus_tile.x, focus_tile.y]
+			context_action_title.text = "Interact"
 		if context_action_status != null:
 			context_action_status.text = "Scanning affordances..."
 		player_node.set_action_lock(true, "context_actions")
@@ -1990,17 +2067,41 @@ func _fetch_context_actions_async(player_id: String, player_position: Vector2, f
 	var targets: Array = []
 	if focus_world != null:
 		var snapped_focus = tile_to_world(world_to_tile(focus_world))
-		var focus_tile = world_to_tile(snapped_focus)
-		if context_action_title != null:
-			context_action_title.text = "Actions @ tile (%d, %d)" % [focus_tile.x, focus_tile.y]
 		targets = _collect_targets_for_tile(snapped_focus)
+		# Update panel title to reflect what's here (not tile coords)
+		if context_action_title != null:
+			if targets.size() == 1:
+				context_action_title.text = str(targets[0].get("name", "Interact"))
+			elif targets.size() > 1:
+				context_action_title.text = "Nearby objects"
+			else:
+				context_action_title.text = "Interact"
 	else:
 		targets = _collect_targets_near(player_position, 120.0)
+
+	# Build set of valid target IDs at the clicked tile for filtering
+	var tile_target_ids: Dictionary = {}
+	if focus_world != null:
+		for t in targets:
+			if not (t is Dictionary): continue
+			var kind = str(t.get("kind", ""))
+			if kind == "object":
+				tile_target_ids[str(t.get("id", ""))] = true
+			elif kind == "entity":
+				tile_target_ids[str(t.get("name", ""))] = true
 
 	# Primary: fetch server-authoritative action descriptors and build menu from them.
 	# Server computes affordances, range, key-lock binding, and carry-conflict in one pass.
 	# Fallback: if the server is unreachable or returns empty, build client-side as before.
 	var server_descriptors = await _fetch_player_legal_descriptors_async(player_id, player_position)
+	# Filter to only descriptors whose target is on the clicked tile
+	if not tile_target_ids.is_empty() and not server_descriptors.is_empty():
+		server_descriptors = server_descriptors.filter(func(d):
+			if not (d is Dictionary): return false
+			var verb = str(d.get("verb", ""))
+			if verb == "wait": return false  # always skip wait
+			return tile_target_ids.has(str(d.get("targetId", "")))
+		)
 	var grouped_actions: Array
 	if not server_descriptors.is_empty():
 		grouped_actions = _build_groups_from_server_descriptors(server_descriptors, player_position)
@@ -2104,7 +2205,8 @@ func _build_groups_from_server_descriptors(descriptors: Array, player_position: 
 
 		var action_type = "interact"
 		if verb == "speak" or verb == "talk": action_type = "speak"
-		elif verb == "attack": action_type = "attack"
+		elif verb == "attack" or verb == "punch" or verb == "kick" or verb == "tackle": action_type = verb
+		elif verb == "throw": action_type = "throw"
 
 		var target_agent = ("object:" + target_id) if target_kind == "object" else target_id
 		var action_desc_text = "%s %s" % [verb, target_name]
@@ -2475,6 +2577,13 @@ func _derive_actions_from_properties(kind: String, target_id: String, target_nam
 				rule.get("description", "Acting on"), rule.get("label", action_key.capitalize()),
 				kind, target_id, target_name, distance)
 
+	# ── Tackle (entity only, distance 2–3 tiles) ──────────────────────────────
+	if kind == "entity" or kind == "agent":
+		if distance >= 2.0 and distance <= 3.0 and not seen_keys.has("tackle"):
+			seen_keys["tackle"] = true
+			_append_action(actions, "tackle", "tackle", "Tackling", "Tackle",
+				kind, target_id, target_name, distance)
+
 	# ── Tool-action rules (inventory-tag-based actions) ───────────────────────
 	# The dict key is the exact tag to match in carried items' properties.tags.
 	# Object definitions are the authority — no synonym guessing here.
@@ -2604,7 +2713,7 @@ const ACTION_CATEGORIES := {
 	"climb_rope": "Items", "unlock_pick": "Items",
 	"throw": "Combat",
 	"open": "Interact", "close": "Interact", "climb": "Interact", "sit": "Interact",
-	"attack": "Combat", "punch": "Combat", "kick": "Combat",
+	"attack": "Combat", "punch": "Combat", "kick": "Combat", "tackle": "Combat",
 	"shove": "Combat", "grab": "Combat",
 }
 
@@ -2613,48 +2722,91 @@ func _action_category(action_key: String) -> String:
 
 ## Nested context menu state — populated in _render_grouped_context_actions.
 var _context_menu_groups: Array = []
+## Currently selected target group (empty = all groups active)
+var _context_menu_selected_group: Dictionary = {}
 
 func _render_grouped_context_actions(groups: Array) -> void:
 	_context_menu_groups = groups
+	_context_menu_selected_group = {}
+	if groups.size() == 1:
+		# Only one target — skip object selection, go straight to categories
+		_context_menu_selected_group = groups[0]
+		_show_category_level()
+	elif groups.size() > 1:
+		_show_target_level()
+	else:
+		_show_category_level()
+
+## Level 0: select which object/entity to interact with (shown only when multiple targets).
+func _show_target_level() -> void:
+	_context_menu_selected_group = {}
+	_clear_context_action_buttons()
+	if context_action_status != null:
+		context_action_status.text = "What do you want to interact with?"
+	if context_action_list == null:
+		return
+	for group in _context_menu_groups:
+		if not (group is Dictionary): continue
+		var tname = str(group.get("targetName", "Object"))
+		var dist = float(group.get("distance", 0.0))
+		var btn = Button.new()
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.text = tname
+		btn.tooltip_text = _distance_hint(dist)
+		btn.pressed.connect(_on_target_selected.bind(group))
+		context_action_list.add_child(btn)
+	_fit_context_panel()
+
+func _distance_hint(dist: float) -> String:
+	if dist <= 1.0: return "Adjacent"
+	elif dist <= 2.0: return "Nearby"
+	elif dist <= 3.0: return "Close by"
+	else: return "In range"
+
+func _on_target_selected(group: Dictionary) -> void:
+	_context_menu_selected_group = group
+	if context_action_title != null:
+		context_action_title.text = str(group.get("targetName", "Interact"))
 	_show_category_level()
 
 ## Level 1: show one category-button per category that has at least one action.
 func _show_category_level() -> void:
 	_clear_context_action_buttons()
+	var working_groups: Array = ([_context_menu_selected_group] if not _context_menu_selected_group.is_empty()
+		else _context_menu_groups)
 	if context_action_status != null:
-		context_action_status.text = "Select a category" if _context_menu_groups.size() > 0 else "No interactables on clicked tile"
+		context_action_status.text = "Select a category" if working_groups.size() > 0 else "Nothing here to interact with"
 	if context_action_list == null:
 		return
 
-	var cat_order = ["Examine", "Social", "Interact", "Items", "Combat"]
+	# Back to target selection if multiple targets exist and one is selected
+	if _context_menu_groups.size() > 1 and not _context_menu_selected_group.is_empty():
+		var back_btn = Button.new()
+		back_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		back_btn.text = "◀  Back"
+		back_btn.pressed.connect(_show_target_level)
+		context_action_list.add_child(back_btn)
 
-	# Collect which categories are present across all groups
+	var cat_order = ["Examine", "Social", "Interact", "Items", "Combat"]
 	var present_cats: Dictionary = {}
-	for group in _context_menu_groups:
+	for group in working_groups:
 		if not (group is Dictionary): continue
-		var group_actions = group.get("actions", [])
-		if not (group_actions is Array): continue
-		for action in group_actions:
+		for action in group.get("actions", []):
 			if not (action is Dictionary): continue
 			var flair = str(action.get("payload", {}).get("flair", ""))
-			var ak = flair.trim_prefix("action:")
-			var cat = _action_category(ak)
-			present_cats[cat] = true
+			present_cats[_action_category(flair.trim_prefix("action:"))] = true
 
-	# Target headers for context (non-interactive)
-	for group in _context_menu_groups:
-		if not (group is Dictionary): continue
-		var header = Label.new()
-		header.text = "%s (%.0f tiles)" % [str(group.get("targetName", "target")), float(group.get("distance", 0.0))]
-		header.add_theme_font_size_override("font_size", 11)
-		header.modulate = Color(0.95, 0.95, 0.75, 0.95)
-		context_action_list.add_child(header)
+	# When showing multiple targets together, show their names as context headers
+	if _context_menu_selected_group.is_empty() and working_groups.size() > 1:
+		for group in working_groups:
+			if not (group is Dictionary): continue
+			var header = Label.new()
+			header.text = str(group.get("targetName", "target"))
+			header.add_theme_font_size_override("font_size", 11)
+			header.modulate = Color(0.95, 0.95, 0.75, 0.95)
+			context_action_list.add_child(header)
+		context_action_list.add_child(HSeparator.new())
 
-	# Separator
-	var sep = HSeparator.new()
-	context_action_list.add_child(sep)
-
-	# Category buttons
 	for cat in cat_order:
 		if not present_cats.has(cat): continue
 		var btn = Button.new()
@@ -2678,37 +2830,36 @@ func _on_category_selected(category: String) -> void:
 ## Level 2: show back button + all actions in the selected category.
 func _show_action_level(category: String) -> void:
 	_clear_context_action_buttons()
+	var working_groups: Array = ([_context_menu_selected_group] if not _context_menu_selected_group.is_empty()
+		else _context_menu_groups)
 	if context_action_status != null:
 		context_action_status.text = "[%s]" % category
 	if context_action_list == null:
 		return
 
-	# Back button
 	var back_btn = Button.new()
 	back_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	back_btn.text = "◀  Back"
 	back_btn.pressed.connect(_show_category_level)
 	context_action_list.add_child(back_btn)
 
-	for group in _context_menu_groups:
+	for group in working_groups:
 		if not (group is Dictionary): continue
-		var group_actions = group.get("actions", [])
-		if not (group_actions is Array): continue
-
 		var cat_actions: Array = []
-		for action in group_actions:
+		for action in group.get("actions", []):
 			if not (action is Dictionary): continue
 			var flair = str(action.get("payload", {}).get("flair", ""))
-			var ak = flair.trim_prefix("action:")
-			if _action_category(ak) == category:
+			if _action_category(flair.trim_prefix("action:")) == category:
 				cat_actions.append(action)
 		if cat_actions.is_empty(): continue
 
-		var header = Label.new()
-		header.text = "%s (%.0f tiles)" % [str(group.get("targetName", "target")), float(group.get("distance", 0.0))]
-		header.add_theme_font_size_override("font_size", 11)
-		header.modulate = Color(0.95, 0.95, 0.75, 0.95)
-		context_action_list.add_child(header)
+		# Show target header only when multiple groups are displayed together
+		if working_groups.size() > 1:
+			var header = Label.new()
+			header.text = str(group.get("targetName", "target"))
+			header.add_theme_font_size_override("font_size", 11)
+			header.modulate = Color(0.95, 0.95, 0.75, 0.95)
+			context_action_list.add_child(header)
 
 		for action in cat_actions:
 			var button = Button.new()
@@ -2772,6 +2923,11 @@ func _open_inventory_picker(source_action: Dictionary) -> void:
 	var inv = player_node.inventory
 	if not (inv is Array) or inv.is_empty():
 		if context_action_status != null:
+			context_action_status.text = "Fetching inventory..."
+		await _sync_player_inventory_async()
+		inv = player_node.inventory
+	if not (inv is Array) or inv.is_empty():
+		if context_action_status != null:
 			context_action_status.text = "Inventory is empty."
 		return
 
@@ -2826,18 +2982,24 @@ func _on_inventory_pick_selected(item_id: String, item_name: String) -> void:
 		)
 		object_interaction_in_last_turn = true
 	elif action_key == "throw":
-		var target_obj = _get_world_object_by_id(target_id) if target_kind == "object" else null
-		var target_agent_id = ("object:" + target_id) if target_kind == "object" else target_id
-		var act_loc = player_node.current_location
-		if target_obj != null:
-			act_loc = str(target_obj.get("location", act_loc))
+		# For agent targets, pass the agent name directly.
+		# For object/tile targets, pass empty string — server will throw to a default tile.
+		var throw_target = target_id if (target_kind == "entity" or target_kind == "agent") else ""
 		enqueue_player_action(
-			player_name, "interact",
-			target_agent_id, act_loc,
+			player_name, "throw",
+			throw_target, player_node.current_location,
 			player_node.position.x, player_node.position.y,
 			"Throwing %s at %s" % [item_name, target_name],
-			"", 0.3, item_id, "action:throw"
+			"", 0.3, item_id, ""
 		)
+		# Optimistically remove the thrown item so inventory reflects the action immediately.
+		# Items may be stored as Dictionaries {"id":..., "name":...} or plain ID strings.
+		if player_node != null and "inventory" in player_node and player_node.inventory is Array:
+			player_node.inventory = player_node.inventory.filter(
+				func(i):
+					if i is Dictionary: return str(i.get("id", "")) != item_id
+					return str(i) != item_id
+			)
 		object_interaction_in_last_turn = true
 	elif action_key == "drop":
 		# Drop action: item already carried, just place at player's feet
@@ -3293,12 +3455,21 @@ func _is_agent_within_dialogue_range(agent_name: String, max_distance: float = -
 	if player_node == null or agent_name.strip_edges() == "":
 		return false
 	var range_limit = dialogue_interaction_tiles if max_distance <= 0.0 else int(max_distance)
-	var pos_player = get_agent_position(player_name)
 	var pos_other = get_agent_position(agent_name)
-	if normalize_location_name(str(pos_player.get("location", ""))) != normalize_location_name(str(pos_other.get("location", ""))):
-		return false
-	var player_world = Vector2(float(pos_player.get("x", 0.0)), float(pos_player.get("y", 0.0)))
-	var other_world = Vector2(float(pos_other.get("x", 0.0)), float(pos_other.get("y", 0.0)))
+	# Only enforce location match when both sides have a known, non-empty location.
+	var pos_player = get_agent_position(player_name)
+	var loc_player = normalize_location_name(str(pos_player.get("location", "")))
+	var loc_other  = normalize_location_name(str(pos_other.get("location", "")))
+	var UNKNOWN_LOCS = ["", "unknown"]
+	if not (loc_player in UNKNOWN_LOCS) and not (loc_other in UNKNOWN_LOCS):
+		if loc_player != loc_other:
+			return false
+	# Use live node position for distance — more accurate than the polled dict which
+	# lags by up to POLL_INTERVAL_SEC seconds after the agent moves.
+	var player_world = player_node.position
+	var other_world = _get_live_entity_position(agent_name)
+	if other_world == Vector2.ZERO:
+		other_world = Vector2(float(pos_other.get("x", 0.0)), float(pos_other.get("y", 0.0)))
 	return tile_manhattan_distance_from_world(player_world, other_world) <= range_limit
 
 func _resolve_nearest_dialogue_target(max_distance: float = -1.0) -> String:
@@ -3452,6 +3623,62 @@ func _submit_dialogue_message():
 
 
 
+func _process(_delta: float) -> void:
+	# Keep player position in agent_positions in sync every frame so range
+	# checks (dialogue, interaction) always use the latest client-side position.
+	if player_node != null:
+		agent_positions[player_name] = {
+			"location": normalize_location_name(player_node.current_location),
+			"x": player_node.position.x,
+			"y": player_node.position.y
+		}
+
+# ── Pause system ──────────────────────────────────────────────────────────────
+
+func _create_pause_overlay() -> void:
+	var ui = get_node_or_null("../UI")
+	if ui == null:
+		return
+	_pause_overlay = ColorRect.new()
+	_pause_overlay.color = Color(0.0, 0.0, 0.0, 0.55)
+	_pause_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_pause_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_pause_overlay.visible = false
+
+	var label = Label.new()
+	label.text = "PAUSED\nPress Space to continue"
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.set_anchors_preset(Control.PRESET_FULL_RECT)
+	label.add_theme_font_size_override("font_size", 36)
+	label.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0, 1.0))
+	label.add_theme_color_override("font_shadow_color", Color(0.0, 0.0, 0.0, 0.9))
+	label.add_theme_constant_override("shadow_offset_x", 2)
+	label.add_theme_constant_override("shadow_offset_y", 2)
+	_pause_overlay.add_child(label)
+	ui.add_child(_pause_overlay)
+
+func toggle_pause() -> void:
+	_apply_pause(not _game_paused)
+
+func _apply_pause(should_pause: bool) -> void:
+	_game_paused = should_pause
+	if _pause_overlay != null:
+		_pause_overlay.visible = _game_paused
+	_set_server_pause(_game_paused)
+
+func _set_server_pause(should_pause: bool) -> void:
+	var http = HTTPRequest.new()
+	add_child(http)
+	var endpoint = "/simulation/pause" if should_pause else "/simulation/resume"
+	http.request_completed.connect(func(_r, _c, _h, _b): http.queue_free())
+	http.request(backend_url + endpoint, [], HTTPClient.METHOD_POST)
+
+func is_game_paused() -> bool:
+	return _game_paused
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 func _poll_backend():
 	"""Poll the backend /state/delta endpoint (lightweight) or /state (full)"""
 	print("[BACKEND] _poll_backend called")
@@ -3540,24 +3767,30 @@ func _on_state_received(result, response_code, headers, body, http):
 	"""Handle state response"""
 	if is_instance_valid(http):
 		http.queue_free()
-	
+
 	if response_code != 200:
 		debug_header_text = "Backend error: " + str(response_code)
 		_refresh_debug_label()
+		# Retry after a longer delay on error so we don't spam a broken server
+		get_tree().create_timer(POLL_INTERVAL_SEC * 2.0).timeout.connect(_poll_backend, CONNECT_ONE_SHOT)
 		return
-	
+
 	# Parse JSON
 	var json = JSON.new()
 	var parse_result = json.parse(body.get_string_from_utf8())
-	
+
 	if parse_result != OK:
 		push_error("Failed to parse JSON from backend")
+		get_tree().create_timer(POLL_INTERVAL_SEC * 2.0).timeout.connect(_poll_backend, CONNECT_ONE_SHOT)
 		return
-	
+
 	var state = json.data
 	_update_world(state)
 	if world_objects.is_empty():
 		_fetch_objects_async()
+
+	# Schedule next poll — drives the live display loop
+	get_tree().create_timer(POLL_INTERVAL_SEC).timeout.connect(_poll_backend, CONNECT_ONE_SHOT)
 
 func _update_world(state):
 	"""Update agent positions and states from backend data (delta or full)"""
@@ -3673,13 +3906,39 @@ func _update_world(state):
 			if not is_player_agent:
 				var agent = agent_nodes[agent_name]
 				agent.update_from_backend(agent_data, locations, base_center)
-	
+				# Update sight-check overlay so it follows the player in the poll loop,
+				# not only on the now-removed /turn response path.
+				_apply_los_to_agent(agent_name, agent)
+				entity_anchors[agent_name] = agent.position
+
 	# Also update player if it exists and is in the agents list
 	if player_node != null and state.has("agents"):
 		for agent_data in state.agents:
 			if agent_data.get("name", "") == player_name:
 				player_node.update_from_backend(agent_data, locations)
+				_sync_player_health_hud()
 				break
+
+	# Refresh object overlays so LOS-based visibility tracks player movement
+	_redraw_object_overlays()
+
+	if state.has("npc_speeches") and state.npc_speeches is Array:
+		for speech in state.npc_speeches:
+			if not (speech is Dictionary): continue
+			var speaker = str(speech.get("speaker", "NPC"))
+			var text = str(speech.get("text", ""))
+			if text == "": continue
+			append_dialogue_line(speaker, text)
+			_show_entity_speech(speaker, text)
+			_append_action_log("[color=#88ffcc]%s:[/color] \"%s\"" % [speaker, text])
+
+	if state.has("npc_actions") and state.npc_actions is Array:
+		for npc_action in state.npc_actions:
+			if not (npc_action is Dictionary): continue
+			var actor = str(npc_action.get("actor", "NPC"))
+			var narrative = str(npc_action.get("narrative", ""))
+			if narrative == "": continue
+			_append_action_log("[color=#ff6666]%s:[/color] %s" % [actor, narrative])
 
 func _progress_simulation():
 	"""POST to /state to advance the simulation one step"""
@@ -3767,6 +4026,8 @@ func enqueue_player_action(player_id: String, action_type: String, target_agent:
 	
 	if error == OK:
 		print("Enqueued action: ", action_type, " by ", player_id)
+		if action_type == "tackle":
+			_force_next_player_position_sync = true
 	else:
 		push_error("Failed to enqueue action")
 		turn_request_in_flight = false
@@ -3783,8 +4044,14 @@ func _on_action_enqueued(result, response_code, headers, body, http):
 		
 		if response.get("success", false):
 			print("Action enqueued successfully")
-			# After enqueuing, automatically process the turn
-			call_deferred("_process_turn")
+			# Turn-based: fire /turn immediately so the server processes the queued
+			# action synchronously. turn_request_in_flight stays true until
+			# _on_turn_processed clears it; _on_turn_processed also handles
+			# inventory sync, object refresh, dialogue reply, and move dispatch.
+			# NOTE: do NOT reset object_interaction_in_last_turn here — it was set
+			# by the action handler and must survive into _on_turn_processed so
+			# that the objects list gets re-fetched (e.g., after throw/drop/place).
+			_process_turn()
 		else:
 			var error_msg = response.get("error", "Unknown error")
 			push_error("Action enqueue failed: " + str(error_msg))
@@ -3906,6 +4173,12 @@ func _on_turn_processed(result, response_code, headers, body, http):
 			push_error("Turn processing failed: ", error_msg)
 			if dialogue_status != null:
 				dialogue_status.text = "Dialogue failed: " + str(error_msg)
+		var log_entry = str(action_result.get("result", ""))
+		if log_entry != "" and log_entry != "null":
+			var pipe_idx = log_entry.find(" | runtime=")
+			if pipe_idx >= 0:
+				log_entry = log_entry.substr(0, pipe_idx)
+			_append_action_log("[color=#ffdd88]You:[/color] " + log_entry)
 	else:
 		push_error("Turn processing failed with code: " + str(response_code))
 		if dialogue_status != null:
@@ -4028,8 +4301,10 @@ func _update_agents_from_turn_response(response: Dictionary):
 			"y": float(agent_data.get("y", 0.0))
 		}
 		if player_node != null and agent_data.get("name", "") == player_name:
-			var force_pos = not pending_context_followup_action.is_empty()
+			var force_pos = not pending_context_followup_action.is_empty() or _force_next_player_position_sync
+			_force_next_player_position_sync = false
 			player_node.update_from_backend(agent_data, locations, force_pos)
+			_sync_player_health_hud()
 
 	# Snapshot live node positions as anchors before any NPC steps so that
 	# approach pathing always targets actual pixel positions, not stale coords.
@@ -4072,6 +4347,12 @@ func submit_player_movement(player_id: String, current_location: String, player_
 	if current_location == "":
 		return
 	mark_player_locally_moved()
+	# Refresh LOS immediately on movement so agent visibility tracks the player position.
+	for agent_name in agent_nodes.keys():
+		var node = agent_nodes[agent_name]
+		if is_instance_valid(node):
+			_apply_los_to_agent(str(agent_name), node)
+	_redraw_object_overlays()
 	enqueue_player_action(
 		player_id,
 		"move",
@@ -4654,8 +4935,11 @@ func _redraw_object_overlays():
 		var tile_center = tile_to_world_center(world_to_tile(tile_origin))
 		var properties = obj.get("properties", {})
 
-		# Walls always drawn; other objects fade when outside LOS
-		var in_los = object_type == "wall" or has_line_of_sight(player_pos_for_los, tile_origin)
+		# Walls always drawn. Carriable ground items within 12 tiles are fully visible so
+		# thrown/dropped loot can always be found nearby; distant carriable items still use LOS.
+		var is_carriable = properties.get("carriable", false) or properties.get("interactive", false)
+		var is_nearby_loot = is_carriable and tile_origin.distance_to(player_pos_for_los) <= 12 * tile_size
+		var in_los = object_type == "wall" or is_nearby_loot or has_line_of_sight(player_pos_for_los, tile_origin)
 
 		var color = _get_object_type_color(object_type)
 		var radius = _get_object_marker_radius(object_type)

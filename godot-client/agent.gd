@@ -8,6 +8,8 @@ var current_activity = ""
 var current_location = ""
 var target_location = ""  # Where this NPC wants to go (set by server)
 var target_object_id = ""  # Optional in-location anchor, e.g. coffee_register
+var health: int = 100
+var is_incapacitated: bool = false
 
 # Per-turn discrete positioning (no smooth lerp — turn-based like Elin/Stone Shard)
 var target_position = Vector2.ZERO
@@ -82,6 +84,13 @@ func update_from_backend(data, location_map, preset_position: Vector2 = Vector2.
 	if data.has("object"):
 		var object_value = data.get("object", "")
 		target_object_id = "" if object_value == null else str(object_value)
+	if data.has("health"):
+		health = int(data.get("health", 100))
+	if data.has("incapacitated"):
+		is_incapacitated = bool(data.get("incapacitated", false))
+	# Also detect incapacitation from activity string for backwards compat
+	if current_activity.to_lower() == "incapacitated":
+		is_incapacitated = true
 
 	# On first spawn, initialise position from server coords or preset
 	if not has_initial_position:
@@ -112,19 +121,26 @@ func show_speech(text: String, duration: float = 6.0) -> void:
 
 func _update_label():
 	"""Update the text label above the agent"""
-	var display_text = agent_name
-	
 	# Keep long activities visible without flooding the label.
 	var activity_display = current_activity
 	if activity_display.length() > 70:
 		activity_display = activity_display.substr(0, 67) + "..."
-	
-	label.text = "%s\n%s\n@ %s" % [agent_name, activity_display, current_location]
+
+	var health_bar = ""
+	if health < 100:
+		var filled = int(health / 10)
+		health_bar = "\n[" + "█".repeat(filled) + "░".repeat(10 - filled) + "] %d" % health
+
+	label.text = "%s\n%s\n@ %s%s" % [agent_name, activity_display, current_location, health_bar]
 
 func _update_appearance():
 	"""Change color based on activity/state"""
+	if is_incapacitated:
+		sprite.modulate = Color(0.25, 0.25, 0.25, 0.7)  # Dark, translucent — knocked out
+		return
+
 	var activity_lower = current_activity.to_lower()
-	
+
 	if "walk" in activity_lower or "moving" in activity_lower or "going" in activity_lower:
 		sprite.modulate = Color.GREEN
 	elif "talk" in activity_lower or "conversation" in activity_lower or "speaking" in activity_lower:
@@ -133,6 +149,8 @@ func _update_appearance():
 		sprite.modulate = Color.RED
 	elif "idle" in activity_lower or "waiting" in activity_lower or "standing" in activity_lower:
 		sprite.modulate = Color.GRAY
+	elif health <= 30:
+		sprite.modulate = Color(1.0, 0.4, 0.1)  # Orange — badly injured
 	else:
 		sprite.modulate = Color.WHITE
 
