@@ -16,10 +16,14 @@ import io.github.nickm980.smallville.api.v1.dto.AgentStateResponse;
 import io.github.nickm980.smallville.api.v1.dto.CreateAgentRequest;
 import io.github.nickm980.smallville.api.v1.dto.CreateLocationRequest;
 import io.github.nickm980.smallville.api.v1.dto.CreateMemoryRequest;
+import io.github.nickm980.smallville.api.v1.dto.CreatePlayerRequest;
+import io.github.nickm980.smallville.api.v1.dto.ObjectInstanceUpsertRequest;
+import io.github.nickm980.smallville.api.v1.dto.PlayerActionRequest;
 import io.github.nickm980.smallville.api.v1.dto.RuntimeOrchestrationRequest;
 import io.github.nickm980.smallville.entities.Agent;
 import io.github.nickm980.smallville.entities.AgentAction;
 import io.github.nickm980.smallville.entities.Location;
+import io.github.nickm980.smallville.entities.SimulationTime;
 import io.github.nickm980.smallville.llm.ChatGPT;
 
 public class SimulationServiceTest {
@@ -144,5 +148,66 @@ public class SimulationServiceTest {
 	assertEquals("Inspecting the shelf", completed.getAction());
 	assertNull(completed.getActiveAction());
 	assertEquals(0, completed.getQueuedActions().size());
+    }
+
+    @Test
+    public void test_save_and_load_restores_core_game_state() {
+	java.time.Duration originalStep = SimulationTime.getStepDuration();
+	java.time.LocalDateTime originalTime = SimulationTime.now();
+	service.deleteSave("slot-3");
+	try {
+	    CreateLocationRequest market = new CreateLocationRequest();
+	    market.setName("market");
+	    market.setType("market");
+	    market.setMinX(0);
+	    market.setMaxX(200);
+	    market.setMinY(0);
+	    market.setMaxY(200);
+	    service.createLocation(market);
+
+	    CreatePlayerRequest player = new CreatePlayerRequest();
+	    player.setName("Player");
+	    player.setLocation("market");
+	    player.setActivity("idle");
+	    player.setMemories(new String[] {"I remember the market."});
+	    service.createPlayer(player);
+
+	    world.getAgent("Player").orElseThrow().setPosition(64, 96);
+
+	    ObjectInstanceUpsertRequest object = new ObjectInstanceUpsertRequest();
+	    object.setType("pencil");
+	    object.setName("Pencil");
+	    object.setX(64);
+	    object.setY(96);
+	    object.setLocation("market");
+	    service.upsertObjectInstance("pencil-1", object);
+
+	    PlayerActionRequest action = new PlayerActionRequest();
+	    action.setPlayerId("Player");
+	    action.setActionType("interact");
+	    action.setActionDescription("Inspecting the pencil");
+	    service.enqueuePlayerAction(action);
+
+	    SimulationTime.setStep(java.time.Duration.ofMinutes(5));
+	    service.saveGame("slot-3");
+
+	    world.getAgent("Player").orElseThrow().setPosition(128, 128);
+	    service.patchObjectProperties("pencil-1", java.util.Map.of("broken", true));
+	    SimulationTime.setStep(java.time.Duration.ofMinutes(1));
+
+	    service.loadGame("slot-3");
+
+	    AgentStateResponse restoredPlayer = service.getAgentState("Player");
+	    assertEquals("market", restoredPlayer.getLocation());
+	    assertEquals(64.0, restoredPlayer.getX());
+	    assertEquals(96.0, restoredPlayer.getY());
+	    assertEquals(5, SimulationTime.getStepDurationInMinutes());
+	    assertEquals("Pencil", service.getObjectInstance("pencil-1").get("name"));
+	    assertEquals(1, service.getPlayerActionHistory("Player", 10).size());
+	} finally {
+	    SimulationTime.setStep(originalStep);
+	    SimulationTime.setSimulationTime(originalTime);
+	    service.deleteSave("slot-3");
+	}
     }
 }

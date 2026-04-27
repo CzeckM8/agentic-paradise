@@ -1,8 +1,13 @@
 package io.github.nickm980.smallville.api.v1;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -22,7 +27,10 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import io.github.nickm980.smallville.World;
 import io.github.nickm980.smallville.api.v1.dto.*;
@@ -36,6 +44,10 @@ import io.github.nickm980.smallville.memory.Memory;
 import io.github.nickm980.smallville.memory.MemoryStream;
 import io.github.nickm980.smallville.memory.Observation;
 import io.github.nickm980.smallville.memory.Plan;
+import io.github.nickm980.smallville.memory.PlanType;
+import io.github.nickm980.smallville.memory.TemporalMemory;
+import io.github.nickm980.smallville.save.SaveGame;
+import io.github.nickm980.smallville.save.SaveSlotSummary;
 import io.github.nickm980.smallville.update.UpdateService;
 
 public class SimulationService {
@@ -59,7 +71,13 @@ public class SimulationService {
 	private static final int MAX_CONVERSATION_TURNS_PER_PAIR = 60;
 	private static final long SOCIAL_APPRAISAL_TTL_MINUTES = 20;
 	private static final int DEFAULT_PLAYER_AFFORDANCE_TILE_RADIUS = 4;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private static final List<String> SAVE_SLOT_IDS = List.of("slot-1", "slot-2", "slot-3");
+    private final Object saveLock = new Object();
+    private final Path savesDirectory = Path.of("saves");
+    private final ObjectMapper objectMapper = new ObjectMapper()
+	.registerModule(new JavaTimeModule())
+	.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+	.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     private volatile String trackedAgentName = DEFAULT_TRACKED_AGENT_NAME;
 
     private final ModelMapper mapper;
@@ -265,6 +283,389 @@ public class SimulationService {
 	this.prompts = new UpdateService(llm, world);
 	this.progress = 0;
 	seedDefaultObjectTypes();
+    }
+
+    public List<SaveSlotSummary> listSaveSlots() {
+	synchronized (saveLock) {
+	    return SAVE_SLOT_IDS.stream().map(this::readSlotSummary).collect(Collectors.toList());
+	}
+    }
+
+    public SaveSlotSummary saveGame(String slotId) {
+	synchronized (saveLock) {
+	    String safeSlot = normalizeSlotId(slotId);
+	    SaveGame save = buildSaveGame(safeSlot);
+	    Path slotDirectory = savesDirectory.resolve(safeSlot);
+	    Path savePath = slotDirectory.resolve("save.json");
+	    Path metadataPath = slotDirectory.resolve("metadata.json");
+	    try {
+		Files.createDirectories(slotDirectory);
+		writeAtomically(savePath, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(save));
+		writeAtomically(metadataPath, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(toSlotSummary(save)));
+		return toSlotSummary(save);
+	    } catch (IOException e) {
+		throw new SmallvilleException("Could not save game: " + e.getMessage());
+	    }
+	}
+    }
+
+    public SaveSlotSummary loadGame(String slotId) {
+	synchronized (saveLock) {
+	    String safeSlot = normalizeSlotId(slotId);
+	    Path savePath = savesDirectory.resolve(safeSlot).resolve("save.json");
+	    if (!Files.exists(savePath)) {
+		throw new SmallvilleException("Save slot is empty: " + safeSlot);
+	    }
+	    try {
+		SaveGame save = objectMapper.readValue(savePath.toFile(), SaveGame.class);
+		restoreSaveGame(save);
+		return toSlotSummary(save);
+	    } catch (IOException e) {
+		throw new SmallvilleException("Could not load game: " + e.getMessage());
+	    }
+	}
+    }
+
+    public boolean deleteSave(String slotId) {
+	synchronized (saveLock) {
+	    String safeSlot = normalizeSlotId(slotId);
+	    Path slotDirectory = savesDirectory.resolve(safeSlot);
+	    try {
+		boolean deletedSave = Files.deleteIfExists(slotDirectory.resolve("save.json"));
+		boolean deletedMetadata = Files.deleteIfExists(slotDirectory.resolve("metadata.json"));
+		return deletedSave || deletedMetadata;
+	    } catch (IOException e) {
+		throw new SmallvilleException("Could not delete save: " + e.getMessage());
+	    }
+	}
+    }
+
+    public Map<String, Object> resetWorldAndSaves() {
+	synchronized (saveLock) {
+	    clearWorldState();
+	    List<String> deletedSlots = new ArrayList<>();
+	    for (String slotId : SAVE_SLOT_IDS) {
+		Path slotDirectory = savesDirectory.resolve(slotId);
+		try {
+		    boolean deletedSave = Files.deleteIfExists(slotDirectory.resolve("save.json"));
+		    boolean deletedMetadata = Files.deleteIfExists(slotDirectory.resolve("metadata.json"));
+		    if (deletedSave || deletedMetadata) {
+			deletedSlots.add(slotId);
+		    }
+		} catch (IOException e) {
+		    throw new SmallvilleException("Could not reset saves: " + e.getMessage());
+		}
+	    }
+	    SimulationTime.setStep(Duration.ofMinutes(1));
+	    SimulationTime.setSimulationTime(LocalDateTime.now().withHour(12).withMinute(0).withSecond(0).withNano(0));
+	    Map<String, Object> result = new LinkedHashMap<>();
+	    result.put("success", true);
+	    result.put("deletedSlots", deletedSlots);
+	    return result;
+	}
+    }
+
+    private SaveGame buildSaveGame(String slotId) {
+	SaveGame save = new SaveGame();
+	save.slotId = slotId;
+	save.displayName = displayNameForSlot(slotId);
+	save.savedAt = LocalDateTime.now();
+	save.simulationTime = SimulationTime.now();
+	save.stepMinutes = SimulationTime.getStepDuration().toMinutes();
+	save.trackedAgentName = trackedAgentName;
+	save.progress = progress;
+	save.turnCounter = turnCounter.get();
+	for (Location location : world.getLocations()) {
+	    save.locations.add(toSavedLocation(location));
+	}
+	for (Agent agent : world.getAgents()) {
+	    save.agents.add(toSavedAgent(agent));
+	}
+	for (Conversation conversation : world.getConversations()) {
+	    save.conversations.add(toSavedConversation(conversation));
+	}
+	objectTypeDefinitions.forEach((key, value) -> save.objectTypeDefinitions.put(key, new LinkedHashMap<>(value)));
+	objectInstances.forEach((key, value) -> save.objectInstances.put(key, value));
+	inventoryByAgent.forEach((key, value) -> save.inventoryByAgent.put(key, new ArrayList<>(value)));
+	actionHistoryByPlayer.forEach((key, value) -> save.actionHistoryByPlayer.put(key, value.stream().map(this::copyActionRequest).collect(Collectors.toList())));
+	save.pendingPlayerActions.addAll(actionQueue.stream().map(this::copyActionRequest).collect(Collectors.toList()));
+	return save;
+    }
+
+    private void restoreSaveGame(SaveGame save) {
+	if (save == null) {
+	    throw new SmallvilleException("Save file was empty");
+	}
+	SimulationTime.setSimulationTime(save.simulationTime == null ? LocalDateTime.now() : save.simulationTime);
+	SimulationTime.setStep(Duration.ofMinutes(save.stepMinutes <= 0 ? 1 : save.stepMinutes));
+	clearWorldState();
+	progress = save.progress;
+	trackedAgentName = save.trackedAgentName == null || save.trackedAgentName.isBlank() ? DEFAULT_TRACKED_AGENT_NAME : save.trackedAgentName;
+	turnCounter.set(save.turnCounter);
+	for (SaveGame.SavedLocation savedLocation : save.locations) {
+	    Location location = fromSavedLocation(savedLocation);
+	    world.create(location);
+	}
+	for (SaveGame.SavedAgent savedAgent : save.agents) {
+	    Agent agent = fromSavedAgent(savedAgent);
+	    world.create(agent);
+	}
+	for (SaveGame.SavedConversation savedConversation : save.conversations) {
+	    Conversation conversation = fromSavedConversation(savedConversation);
+	    if (conversation.size() > 0) {
+		world.create(conversation);
+	    }
+	}
+	if (save.objectTypeDefinitions != null) {
+	    save.objectTypeDefinitions.forEach((key, value) -> objectTypeDefinitions.put(key, new LinkedHashMap<>(value)));
+	}
+	if (objectTypeDefinitions.isEmpty()) {
+	    seedDefaultObjectTypes();
+	}
+	if (save.objectInstances != null) {
+	    objectInstances.putAll(save.objectInstances);
+	}
+	if (save.inventoryByAgent != null) {
+	    save.inventoryByAgent.forEach((key, value) -> inventoryByAgent.put(key, new LinkedHashSet<>(value)));
+	}
+	if (save.actionHistoryByPlayer != null) {
+	    save.actionHistoryByPlayer.forEach((key, value) -> actionHistoryByPlayer.put(key, new ArrayDeque<>(value)));
+	}
+	if (save.pendingPlayerActions != null) {
+	    actionQueue.addAll(save.pendingPlayerActions.stream().map(this::copyActionRequest).collect(Collectors.toList()));
+	}
+	for (Agent agent : world.getAgents()) {
+	    inventoryByAgent.putIfAbsent(agent.getFullName(), new LinkedHashSet<>());
+	    refreshAgentCarriedItems(agent);
+	}
+    }
+
+    private void clearWorldState() {
+	world.clear();
+	objectTypeDefinitions.clear();
+	objectInstances.clear();
+	inventoryByAgent.clear();
+	actionHistoryByPlayer.clear();
+	actionQueue.clear();
+	runtimeStateByAgent.clear();
+	reactiveEventsByAgent.clear();
+	committedActionsByAgent.clear();
+	agenticStateByAgent.clear();
+	socialEpisodesByAgent.clear();
+	conversationTurnsByPair.clear();
+	chronicle.clear();
+	cognitionInFlight.clear();
+	pendingCognitionApplies.clear();
+	cachedLocations = null;
+	cachedLocationEntities = null;
+	progress = 0;
+	trackedAgentName = DEFAULT_TRACKED_AGENT_NAME;
+	turnCounter.set(0);
+	seedDefaultObjectTypes();
+    }
+
+    private SaveGame.SavedLocation toSavedLocation(Location location) {
+	SaveGame.SavedLocation saved = new SaveGame.SavedLocation();
+	saved.name = location.getFullPath();
+	saved.state = location.getState();
+	saved.type = location.getType();
+	saved.minX = location.getMinX();
+	saved.maxX = location.getMaxX();
+	saved.minY = location.getMinY();
+	saved.maxY = location.getMaxY();
+	return saved;
+    }
+
+    private Location fromSavedLocation(SaveGame.SavedLocation saved) {
+	Location location = new Location(saved.name);
+	location.setState(saved.state);
+	location.setType(saved.type);
+	location.setMinX(saved.minX);
+	location.setMaxX(saved.maxX);
+	location.setMinY(saved.minY);
+	location.setMaxY(saved.maxY);
+	return location;
+    }
+
+    private SaveGame.SavedAgent toSavedAgent(Agent agent) {
+	SaveGame.SavedAgent saved = new SaveGame.SavedAgent();
+	saved.name = agent.getFullName();
+	saved.player = agent instanceof Player;
+	saved.activity = agent.getCurrentActivity();
+	saved.emoji = agent.getEmoji();
+	saved.location = agent.getLocation() == null ? null : agent.getLocation().getFullPath();
+	saved.targetLocation = agent.getTargetLocation();
+	saved.traits = agent.getTraits();
+	saved.x = agent.getX();
+	saved.y = agent.getY();
+	saved.hasBeenOrchestrated = agent.hasBeenOrchestrated();
+	saved.deferScriptedActivityPresentation = agent.isDeferScriptedActivityPresentation();
+	saved.stressLevel = agent.getStressLevel();
+	saved.carriedItemNames = new ArrayList<>(agent.getCarriedItemNames());
+	saved.typedInventory = new LinkedHashMap<>(agent.getInventory());
+	saved.pendingActions = agent.getPendingActions();
+	if (agent instanceof Player player) {
+	    saved.playerStress = player.getStress();
+	}
+	for (Memory memory : agent.getMemoryStream().getMemories()) {
+	    saved.memories.add(toSavedMemory(memory));
+	}
+	return saved;
+    }
+
+    private Agent fromSavedAgent(SaveGame.SavedAgent saved) {
+	Location location = saved.location == null ? null : world.getLocation(saved.location).orElse(null);
+	List<Characteristic> characteristics = saved.memories.stream()
+	    .filter(memory -> "characteristic".equals(memory.type))
+	    .map(memory -> new Characteristic(memory.description))
+	    .collect(Collectors.toList());
+	Agent agent = saved.player
+	    ? new Player(saved.name, characteristics, saved.activity, location)
+	    : new Agent(saved.name, characteristics, saved.activity, location);
+	agent.setPosition(saved.x, saved.y);
+	agent.setCurrentEmoji(saved.emoji);
+	agent.setTargetLocation(saved.targetLocation);
+	agent.setTraits(saved.traits);
+	agent.setHasBeenOrchestrated(saved.hasBeenOrchestrated);
+	agent.setDeferScriptedActivityPresentation(saved.deferScriptedActivityPresentation);
+	agent.applyStressChange(saved.stressLevel - agent.getStressLevel());
+	agent.setCarriedItemNames(saved.carriedItemNames);
+	agent.getInventory().clear();
+	if (saved.typedInventory != null) {
+	    agent.getInventory().putAll(saved.typedInventory);
+	}
+	List<Memory> restoredMemories = saved.memories.stream()
+	    .filter(memory -> !"characteristic".equals(memory.type))
+	    .map(this::fromSavedMemory)
+	    .collect(Collectors.toList());
+	agent.getMemoryStream().addAll(restoredMemories);
+	if (saved.pendingActions != null) {
+	    agent.replaceActionQueue(saved.pendingActions);
+	}
+	if (agent instanceof Player player) {
+	    player.setStress(saved.playerStress);
+	}
+	return agent;
+    }
+
+    private SaveGame.SavedMemory toSavedMemory(Memory memory) {
+	SaveGame.SavedMemory saved = new SaveGame.SavedMemory();
+	saved.description = memory.getDescription();
+	saved.importance = (int) memory.getImportance();
+	if (memory instanceof Characteristic) {
+	    saved.type = "characteristic";
+	} else if (memory instanceof Plan plan) {
+	    saved.type = "plan";
+	    saved.time = plan.getTime();
+	    saved.planType = plan.getType().name();
+	} else if (memory instanceof Observation observation) {
+	    saved.type = "observation";
+	    saved.time = observation.getTime();
+	    saved.reactable = observation.isReactable();
+	} else {
+	    saved.type = "observation";
+	    if (memory instanceof TemporalMemory temporalMemory) {
+		saved.time = temporalMemory.getTime();
+	    }
+	}
+	return saved;
+    }
+
+    private Memory fromSavedMemory(SaveGame.SavedMemory saved) {
+	if ("plan".equals(saved.type)) {
+	    PlanType type = saved.planType == null ? PlanType.LONG_TERM : PlanType.valueOf(saved.planType);
+	    return new Plan(saved.description, saved.time == null ? SimulationTime.now() : saved.time, type);
+	}
+	Observation observation = new Observation(saved.description, saved.time == null ? SimulationTime.now() : saved.time, saved.importance);
+	observation.setReactable(saved.reactable);
+	return observation;
+    }
+
+    private SaveGame.SavedConversation toSavedConversation(Conversation conversation) {
+	SaveGame.SavedConversation saved = new SaveGame.SavedConversation();
+	saved.talker = conversation.getTalker();
+	saved.talkee = conversation.getTalkee();
+	for (Dialog dialog : conversation.getDialog()) {
+	    SaveGame.SavedDialog savedDialog = new SaveGame.SavedDialog();
+	    savedDialog.name = dialog.getName();
+	    savedDialog.message = dialog.getMessage();
+	    saved.dialog.add(savedDialog);
+	}
+	return saved;
+    }
+
+    private Conversation fromSavedConversation(SaveGame.SavedConversation saved) {
+	List<Dialog> dialog = saved.dialog.stream()
+	    .map(item -> new Dialog(item.name, item.message))
+	    .collect(Collectors.toList());
+	return new Conversation(saved.talker, saved.talkee, dialog);
+    }
+
+    private SaveSlotSummary readSlotSummary(String slotId) {
+	Path metadataPath = savesDirectory.resolve(slotId).resolve("metadata.json");
+	if (!Files.exists(metadataPath)) {
+	    return new SaveSlotSummary(slotId, displayNameForSlot(slotId), true);
+	}
+	try {
+	    SaveSlotSummary summary = objectMapper.readValue(metadataPath.toFile(), SaveSlotSummary.class);
+	    summary.empty = false;
+	    return summary;
+	} catch (IOException e) {
+	    SaveSlotSummary summary = new SaveSlotSummary(slotId, displayNameForSlot(slotId), false);
+	    summary.playerLocation = "Unreadable save";
+	    return summary;
+	}
+    }
+
+    private SaveSlotSummary toSlotSummary(SaveGame save) {
+	SaveSlotSummary summary = new SaveSlotSummary(save.slotId, save.displayName, false);
+	summary.savedAt = save.savedAt;
+	summary.simulationTime = save.simulationTime == null ? null : save.simulationTime.format(DateTimeFormatter.ofPattern("h:mm a"));
+	summary.agentCount = save.agents.size();
+	summary.objectCount = save.objectInstances.size();
+	save.agents.stream()
+	    .filter(agent -> agent.player)
+	    .findFirst()
+	    .ifPresent(player -> {
+		summary.playerName = player.name;
+		summary.playerLocation = player.location;
+	    });
+	if (summary.playerName == null && !save.agents.isEmpty()) {
+	    SaveGame.SavedAgent agent = save.agents.get(0);
+	    summary.playerName = agent.name;
+	    summary.playerLocation = agent.location;
+	}
+	return summary;
+    }
+
+    private void writeAtomically(Path path, String content) throws IOException {
+	Path tmpPath = path.resolveSibling(path.getFileName().toString() + ".tmp");
+	Files.writeString(tmpPath, content);
+	try {
+	    Files.move(tmpPath, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+	} catch (IOException e) {
+	    Files.move(tmpPath, path, StandardCopyOption.REPLACE_EXISTING);
+	}
+    }
+
+    private String normalizeSlotId(String slotId) {
+	if (slotId == null || slotId.isBlank()) {
+	    throw new SmallvilleException("Save slot cannot be blank");
+	}
+	String normalized = slotId.trim().toLowerCase();
+	if (!SAVE_SLOT_IDS.contains(normalized)) {
+	    throw new SmallvilleException("Unknown save slot: " + slotId);
+	}
+	return normalized;
+    }
+
+    private String displayNameForSlot(String slotId) {
+	return switch (slotId) {
+	    case "slot-1" -> "Slot 1";
+	    case "slot-2" -> "Slot 2";
+	    case "slot-3" -> "Slot 3";
+	    default -> slotId;
+	};
     }
 
 	private void seedDefaultObjectTypes() {

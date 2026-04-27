@@ -31,6 +31,7 @@ import io.javalin.community.routing.annotations.Get;
 import io.javalin.community.routing.annotations.Param;
 import io.javalin.community.routing.annotations.Patch;
 import io.javalin.community.routing.annotations.Post;
+import io.javalin.community.routing.annotations.Delete;
 import io.javalin.http.Context;
 
 @Endpoints("/")
@@ -436,6 +437,47 @@ public final class SimulationController {
 	    ctx.json(Map.of("success", true, "result", result));
 	} catch (Exception e) {
 	    ctx.status(500).json(Map.of("success", false, "error", e.getMessage()));
+	}
+    }
+
+    @Post("/world/reset")
+    public void resetWorld(Context ctx) {
+	try {
+	    ctx.json(service.resetWorldAndSaves());
+	} catch (Exception e) {
+	    ctx.status(400).json(Map.of("success", false, "error", e.getMessage()));
+	}
+    }
+
+    @Get("/saves")
+    public void listSaves(Context ctx) {
+	ctx.json(Map.of("saves", service.listSaveSlots()));
+    }
+
+    @Post("/saves/{slotId}")
+    public void saveGame(Context ctx, @Param("slotId") String slotId) {
+	try {
+	    ctx.json(Map.of("success", true, "save", service.saveGame(slotId)));
+	} catch (Exception e) {
+	    ctx.status(400).json(Map.of("success", false, "error", e.getMessage()));
+	}
+    }
+
+    @Post("/saves/{slotId}/load")
+    public void loadGame(Context ctx, @Param("slotId") String slotId) {
+	try {
+	    ctx.json(Map.of("success", true, "save", service.loadGame(slotId)));
+	} catch (Exception e) {
+	    ctx.status(400).json(Map.of("success", false, "error", e.getMessage()));
+	}
+    }
+
+    @Delete("/saves/{slotId}")
+    public void deleteSave(Context ctx, @Param("slotId") String slotId) {
+	try {
+	    ctx.json(Map.of("success", true, "deleted", service.deleteSave(slotId)));
+	} catch (Exception e) {
+	    ctx.status(400).json(Map.of("success", false, "error", e.getMessage()));
 	}
     }
 

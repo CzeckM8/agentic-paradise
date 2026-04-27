@@ -60,6 +60,7 @@ var pending_context_followup_action: Dictionary = {}
 var object_interaction_in_last_turn = false
 var carry_action_in_last_turn = false
 var player_has_local_movement = false
+var force_player_position_sync_once = false
 var last_conversation_signature = ""
 ## Prevents re-appending the same server dialog line every /turn (full conversation history is replayed).
 var _dialogue_signatures_seen: Dictionary = {}
@@ -71,6 +72,21 @@ var write_panel: Panel = null
 var write_panel_label: Label = null
 var write_panel_input: LineEdit = null
 var _pending_write_action: Dictionary = {}
+var save_load_button: Button = null
+var home_button: Button = null
+var exit_to_menu_dialog: ConfirmationDialog = null
+var save_load_panel: Panel = null
+var save_load_title: Label = null
+var save_load_slots: VBoxContainer = null
+var save_load_status: Label = null
+var save_load_save_button: Button = null
+var save_load_load_button: Button = null
+var save_slot_buttons: Dictionary = {}
+var save_slot_data: Dictionary = {}
+var selected_save_slot = "slot-1"
+var save_load_panel_height = 420.0
+var save_load_panel_min_width = 560.0
+var save_load_panel_max_width = 980.0
 
 # ── Target-property rules ────────────────────────────────────────────────────
 # Actions available based on what the TARGET object/entity offers.
@@ -233,22 +249,32 @@ func _ready():
 	_ensure_grid_overlay_container()
 	_wire_dialogue_ui()
 	_wire_context_action_ui()
+	_wire_save_load_ui()
 	_set_loading(true, "Connecting to server...")
 
 	var backend_ready = await _wait_for_backend_ready()
 	if not backend_ready:
-		_set_loading(true, "ERROR: Server unreachable. Run start_server.bat")
-		push_error("Backend not reachable at " + backend_url + ". Check start_server.bat or run server manually.")
+		_set_loading(true, "ERROR: Server unreachable. Run start_server.bat or start_server.sh")
+		push_error("Backend not reachable at " + backend_url + ". Check start_server.bat/start_server.sh or run server manually.")
 		return
 
-	# Now proceed with initialization
-	if FileAccess.file_exists(save_file_path):
-		print("Found saved state, loading...")
+	var session = get_node_or_null("/root/GameSession")
+	var load_slot = ""
+	if session != null:
+		load_slot = str(session.pending_load_slot)
+		session.pending_load_slot = ""
+
+	if load_slot != "":
+		print("Loading saved world: ", load_slot)
 		_set_loading(true, "Loading saved world...")
-		await _load_and_initialize_state()
+		var loaded = await _post_load_slot(load_slot)
+		if not loaded:
+			_set_loading(true, "ERROR: Could not load saved world.")
+			return
 	else:
-		print("No saved state, creating new world...")
+		print("Creating world...")
 		_set_loading(true, "Creating world...")
+		await _post_reset_world()
 		await _initialize_new_world()
 
 	# Fetch world state first so the map is visible in the background
@@ -271,12 +297,14 @@ func _ready():
 	call_deferred("_poll_backend")
 
 func _wait_for_backend_ready() -> bool:
-	"""Verify backend availability and optionally start it via bat file.
-	Launches start_server.bat immediately (it kills stale port processes itself),
-	then polls until the server responds or the timeout expires."""
+	"""Verify backend availability and optionally start it."""
+	if await _ping_backend():
+		print("Backend is already reachable")
+		return true
+
 	if auto_start_backend:
 		_set_loading(true, "Starting server (first launch may take ~30s)...")
-		print("Launching start_server.bat...")
+		print("Launching backend server...")
 		_start_backend_server()
 
 	for i in range(backend_wait_attempts):
@@ -306,28 +334,36 @@ func _ping_backend() -> bool:
 	return response_code == 200
 
 func _start_backend_server():
-	"""Start the Java backend via start_server.bat, resolved relative to the project root."""
-	# Project root is one directory up from the godot-client folder.
-	# ProjectSettings.globalize_path("res://") gives the absolute path to godot-client/.
 	var project_dir = ProjectSettings.globalize_path("res://")
-	# Normalize slashes and strip trailing separator
 	project_dir = project_dir.replace("\\", "/").trim_suffix("/")
-	# Walk up one level to the repo root
 	var repo_root = project_dir.get_base_dir()
 	var bat_path = repo_root + "/start_server.bat"
+	var sh_path = repo_root + "/start_server.sh"
 
-	if not FileAccess.file_exists(bat_path):
-		push_error("[SERVER] start_server.bat not found at: " + bat_path)
-		_set_loading(true, "start_server.bat not found — start server manually")
+	if OS.get_name() == "Windows":
+		if not FileAccess.file_exists(bat_path):
+			push_error("[SERVER] start_server.bat not found at: " + bat_path)
+			_set_loading(true, "start_server.bat not found — start server manually")
+			return
+		print("[SERVER] Launching: " + bat_path)
+		var windows_pid = OS.create_process("cmd.exe", ["/c", "start", "", bat_path])
+		if windows_pid > 0:
+			print("[SERVER] Launch command sent (pid=" + str(windows_pid) + ")")
+		else:
+			push_error("[SERVER] Failed to launch start_server.bat (pid=" + str(windows_pid) + ")")
 		return
 
-	print("[SERVER] Launching: " + bat_path)
-	# Use 'start' so the bat runs in its own console window (required for stdin/pipes)
-	var pid = OS.create_process("cmd.exe", ["/c", "start", "", bat_path])
+	if not FileAccess.file_exists(sh_path):
+		push_error("[SERVER] start_server.sh not found at: " + sh_path)
+		_set_loading(true, "start_server.sh not found — start server manually")
+		return
+
+	print("[SERVER] Launching: " + sh_path)
+	var pid = OS.create_process("/usr/bin/env", ["bash", sh_path])
 	if pid > 0:
 		print("[SERVER] Launch command sent (pid=" + str(pid) + ")")
 	else:
-		push_error("[SERVER] Failed to launch start_server.bat (pid=" + str(pid) + ")")
+		push_error("[SERVER] Failed to launch start_server.sh (pid=" + str(pid) + ")")
 
 func _reset_simulation_clock_to_noon() -> void:
 	"""Reset simulation time to 12:00 PM for a newly initialized world."""
@@ -1304,6 +1340,17 @@ func _activate_player_camera(player_nd: Node2D) -> void:
 		if cam.has_method("reset_smoothing"):
 			cam.reset_smoothing()
 
+func _spawn_player_node_for_loaded_state(loaded_player_name: String) -> void:
+	if player_node != null:
+		return
+	var player_node_instance = player_scene.instantiate()
+	player_node_instance.name = "Player"
+	agents_container.add_child(player_node_instance)
+	player_node = player_node_instance
+	player_name = loaded_player_name if loaded_player_name.strip_edges() != "" else player_name
+	player_node_instance.player_name = player_name
+	_activate_player_camera(player_node_instance)
+
 func _create_player_async(player_data) -> void:
 	"""Async POST request to create a player character. Awaitable.
 	The player node is always spawned regardless of server response so the
@@ -1426,6 +1473,281 @@ func _wire_context_action_ui():
 		context_action_close_button.pressed.connect(close_context_action_panel)
 	if context_action_panel != null:
 		context_action_panel.visible = false
+
+func _set_centered_panel_size(panel: Control, width: float, height: float):
+	var half_width = width * 0.5
+	var half_height = height * 0.5
+	panel.offset_left = -half_width
+	panel.offset_top = -half_height
+	panel.offset_right = half_width
+	panel.offset_bottom = half_height
+
+func _wire_save_load_ui():
+	var ui = get_node("../UI")
+	save_load_button = Button.new()
+	save_load_button.name = "SaveLoadButton"
+	save_load_button.text = "Save / Load"
+	save_load_button.anchor_left = 1.0
+	save_load_button.anchor_right = 1.0
+	save_load_button.offset_left = -170.0
+	save_load_button.offset_top = 10.0
+	save_load_button.offset_right = -10.0
+	save_load_button.offset_bottom = 48.0
+	save_load_button.pressed.connect(_open_save_load_panel)
+	ui.add_child(save_load_button)
+
+	home_button = Button.new()
+	home_button.name = "HomeButton"
+	home_button.text = "Exit to menu"
+	home_button.anchor_left = 1.0
+	home_button.anchor_right = 1.0
+	home_button.offset_left = -170.0
+	home_button.offset_top = 56.0
+	home_button.offset_right = -10.0
+	home_button.offset_bottom = 94.0
+	home_button.pressed.connect(_exit_to_home_screen)
+	ui.add_child(home_button)
+
+	exit_to_menu_dialog = ConfirmationDialog.new()
+	exit_to_menu_dialog.name = "ExitToMenuDialog"
+	exit_to_menu_dialog.title = "Exit to menu"
+	exit_to_menu_dialog.dialog_text = "Are you sure? Any unsaved progress will be lost!"
+	exit_to_menu_dialog.confirmed.connect(_confirm_exit_to_home_screen)
+	ui.add_child(exit_to_menu_dialog)
+
+	save_load_panel = Panel.new()
+	save_load_panel.name = "SaveLoadPanel"
+	save_load_panel.visible = false
+	save_load_panel.anchor_left = 0.5
+	save_load_panel.anchor_top = 0.5
+	save_load_panel.anchor_right = 0.5
+	save_load_panel.anchor_bottom = 0.5
+	_set_centered_panel_size(save_load_panel, save_load_panel_min_width, save_load_panel_height)
+	ui.add_child(save_load_panel)
+
+	var margin = MarginContainer.new()
+	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	margin.add_theme_constant_override("margin_left", 18)
+	margin.add_theme_constant_override("margin_right", 18)
+	margin.add_theme_constant_override("margin_top", 18)
+	margin.add_theme_constant_override("margin_bottom", 18)
+	save_load_panel.add_child(margin)
+
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	margin.add_child(vbox)
+
+	save_load_title = Label.new()
+	save_load_title.text = "Save / Load Game"
+	save_load_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	save_load_title.add_theme_font_size_override("font_size", 24)
+	vbox.add_child(save_load_title)
+
+	save_load_slots = VBoxContainer.new()
+	save_load_slots.add_theme_constant_override("separation", 8)
+	vbox.add_child(save_load_slots)
+
+	for slot_id in ["slot-1", "slot-2", "slot-3"]:
+		var slot_button = Button.new()
+		slot_button.custom_minimum_size = Vector2(0, 62)
+		slot_button.text = slot_id
+		slot_button.pressed.connect(_select_save_slot.bind(slot_id))
+		save_load_slots.add_child(slot_button)
+		save_slot_buttons[slot_id] = slot_button
+
+	var action_row = HBoxContainer.new()
+	action_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(action_row)
+
+	save_load_save_button = Button.new()
+	save_load_save_button.text = "Save Selected"
+	save_load_save_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	save_load_save_button.pressed.connect(_save_selected_slot)
+	action_row.add_child(save_load_save_button)
+
+	save_load_load_button = Button.new()
+	save_load_load_button.text = "Load Selected"
+	save_load_load_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	save_load_load_button.pressed.connect(_load_selected_slot)
+	action_row.add_child(save_load_load_button)
+
+	var close_button = Button.new()
+	close_button.text = "Close"
+	close_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	close_button.pressed.connect(_close_save_load_panel)
+	action_row.add_child(close_button)
+
+	save_load_status = Label.new()
+	save_load_status.text = "Select a slot."
+	save_load_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(save_load_status)
+
+func _open_save_load_panel():
+	save_load_panel.visible = true
+	save_load_status.text = "Loading save slots..."
+	await _refresh_save_slots()
+
+func _close_save_load_panel():
+	save_load_panel.visible = false
+
+func _exit_to_home_screen():
+	if exit_to_menu_dialog != null:
+		exit_to_menu_dialog.popup_centered()
+		return
+
+	_confirm_exit_to_home_screen()
+
+func _confirm_exit_to_home_screen():
+	turn_request_in_flight = false
+	dialogue_request_in_flight = false
+	context_actions_request_in_flight = false
+	get_tree().change_scene_to_file("res://scenes/ui/mainMenu.tscn")
+
+func _refresh_save_slots() -> bool:
+	var http = HTTPRequest.new()
+	add_child(http)
+	var err = http.request(backend_url + "/saves")
+	if err != OK:
+		http.queue_free()
+		save_load_status.text = "Could not request save slots."
+		return false
+	var response = await http.request_completed
+	http.queue_free()
+	if response[1] != 200:
+		save_load_status.text = "Could not load save slots."
+		return false
+	var json = JSON.new()
+	if json.parse(response[3].get_string_from_utf8()) != OK:
+		save_load_status.text = "Could not parse save slots."
+		return false
+	save_slot_data.clear()
+	var slots = json.data.get("saves", [])
+	for slot in slots:
+		if slot is Dictionary:
+			save_slot_data[str(slot.get("slotId", ""))] = slot
+	_render_save_slots()
+	return true
+
+func _render_save_slots():
+	var longest_text = ""
+	for slot_id in save_slot_buttons.keys():
+		var button = save_slot_buttons[slot_id]
+		var slot = save_slot_data.get(slot_id, {})
+		var display_name = str(slot.get("displayName", slot_id))
+		var is_empty = bool(slot.get("empty", true))
+		var selected_prefix = "> " if slot_id == selected_save_slot else ""
+		if is_empty:
+			button.text = selected_prefix + display_name + "\nEmpty"
+		else:
+			var location = str(slot.get("playerLocation", "Unknown"))
+			var time = str(slot.get("simulationTime", "--:--"))
+			var saved_at = str(slot.get("savedAt", ""))
+			button.text = selected_prefix + display_name + "\n" + location + " | " + time + " | " + saved_at
+		if button.text.length() > longest_text.length():
+			longest_text = button.text
+	_resize_save_load_panel_for_slot_text(longest_text)
+	save_load_load_button.disabled = bool(save_slot_data.get(selected_save_slot, {}).get("empty", true))
+	save_load_status.text = "Selected " + selected_save_slot + "."
+
+func _resize_save_load_panel_for_slot_text(longest_text: String):
+	if save_load_panel == null:
+		return
+	var font = save_load_panel.get_theme_default_font()
+	var font_size = 20
+	var longest_line = ""
+	for line in longest_text.split("\n"):
+		if line.length() > longest_line.length():
+			longest_line = line
+	var text_width = font.get_string_size(longest_line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x if font != null else longest_line.length() * 12.0
+	var desired_width = clamp(text_width + 140.0, save_load_panel_min_width, save_load_panel_max_width)
+	_set_centered_panel_size(save_load_panel, desired_width, save_load_panel_height)
+
+func _select_save_slot(slot_id: String):
+	selected_save_slot = slot_id
+	_render_save_slots()
+
+func _save_selected_slot():
+	_set_loading(true, "Saving game...")
+	var ok = await _post_save_slot(selected_save_slot)
+	_set_loading(false)
+	if ok:
+		save_load_status.text = "Game saved."
+		await _refresh_save_slots()
+	else:
+		save_load_status.text = "Save failed."
+
+func _load_selected_slot():
+	if bool(save_slot_data.get(selected_save_slot, {}).get("empty", true)):
+		save_load_status.text = "That slot is empty."
+		return
+	_set_loading(true, "Loading game...")
+	var ok = await _post_load_slot(selected_save_slot)
+	if ok:
+		await _refresh_world_after_load()
+		save_load_panel.visible = false
+	_set_loading(false)
+	save_load_status.text = "Game loaded." if ok else "Load failed."
+
+func _post_save_slot(slot_id: String) -> bool:
+	var http = HTTPRequest.new()
+	add_child(http)
+	var err = http.request(backend_url + "/saves/" + slot_id.uri_encode(), ["Content-Type: application/json"], HTTPClient.METHOD_POST, "{}")
+	if err != OK:
+		http.queue_free()
+		return false
+	var response = await http.request_completed
+	http.queue_free()
+	return response[1] == 200
+
+func _post_load_slot(slot_id: String) -> bool:
+	var http = HTTPRequest.new()
+	add_child(http)
+	var err = http.request(backend_url + "/saves/" + slot_id.uri_encode() + "/load", ["Content-Type: application/json"], HTTPClient.METHOD_POST, "{}")
+	if err != OK:
+		http.queue_free()
+		return false
+	var response = await http.request_completed
+	http.queue_free()
+	return response[1] == 200
+
+func _post_reset_world() -> bool:
+	var http = HTTPRequest.new()
+	add_child(http)
+	var err = http.request(backend_url + "/world/reset", ["Content-Type: application/json"], HTTPClient.METHOD_POST, "{}")
+	if err != OK:
+		http.queue_free()
+		return false
+	var response = await http.request_completed
+	http.queue_free()
+	return response[1] == 200
+
+func _refresh_world_after_load():
+	_clear_client_world_for_load()
+	player_has_local_movement = false
+	force_player_position_sync_once = true
+	await _fetch_locations_async()
+	await _fetch_state_snapshot_async()
+	await _fetch_agents_snapshot_async()
+	await _fetch_objects_async()
+	_dialogue_signatures_seen.clear()
+	last_conversation_signature = ""
+	last_runtime_request.clear()
+	_refresh_debug_label()
+
+func _clear_client_world_for_load():
+	for agent_name in agent_nodes.keys():
+		var node = agent_nodes[agent_name]
+		if is_instance_valid(node):
+			node.queue_free()
+	agent_nodes.clear()
+	agent_positions.clear()
+	locations.clear()
+	world_objects.clear()
+	blocked_tiles.clear()
+	los_blocking_tiles.clear()
+	if object_overlays != null:
+		for child in object_overlays.get_children():
+			child.queue_free()
 
 func _create_write_panel() -> void:
 	"""Build the write-text modal panel programmatically."""
@@ -3617,6 +3939,8 @@ func _update_world(state):
 		for agent_data in state.agents:
 			var agent_name = agent_data.get("name", "unknown")
 			var is_player_agent = agent_name == player_name
+			if is_player_agent and player_node == null:
+				_spawn_player_node_for_loaded_state(agent_name)
 			
 			# Do not create a second generic node for the controllable player.
 			if is_player_agent and agent_nodes.has(agent_name):
@@ -3678,7 +4002,16 @@ func _update_world(state):
 	if player_node != null and state.has("agents"):
 		for agent_data in state.agents:
 			if agent_data.get("name", "") == player_name:
-				player_node.update_from_backend(agent_data, locations)
+				var force_loaded_position = force_player_position_sync_once
+				player_node.update_from_backend(agent_data, locations, force_loaded_position)
+				if force_loaded_position:
+					force_player_position_sync_once = false
+					player_has_local_movement = true
+					agent_positions[player_name] = {
+						"location": normalize_location_name(player_node.current_location),
+						"x": player_node.position.x,
+						"y": player_node.position.y
+					}
 				break
 
 func _progress_simulation():
@@ -4141,13 +4474,7 @@ func _apply_los_to_agent(agent_name: String, agent_node) -> void:
 	agent_node.modulate.a = 1.0 if visible_to_player else 0.0
 
 func _save_state():
-	"""Save current backend state to file"""
-	var http = HTTPRequest.new()
-	add_child(http)
-	http.request_completed.connect(_on_save_state_received.bind(http))
-	
-	# Get current state from backend
-	http.request(backend_url + "/state")
+	await _save_selected_slot()
 
 func _on_save_state_received(result, response_code, headers, body, http):
 	"""Save the received state to disk"""
@@ -4335,10 +4662,12 @@ func _input(event):
 			return
 
 	if event is InputEventKey and event.pressed and event.ctrl_pressed:
-		# Ctrl+S to save state
 		if event.keycode == KEY_S:
 			print("Saving state...")
-			_save_state()
+			await _save_state()
+
+		if event.keycode == KEY_L:
+			await _open_save_load_panel()
 		
 		# Ctrl+P to progress simulation manually
 		if event.keycode == KEY_P:

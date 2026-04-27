@@ -58,6 +58,16 @@ public class World {
 	return locations.all();
     }
 
+    public List<Conversation> getConversations() {
+	return conversations.all();
+    }
+
+    public void clear() {
+	this.locations = new Repository<>();
+	this.agents = new Repository<>();
+	this.conversations = new Repository<>();
+    }
+
     public Optional<Location> getLocation(String locationName) {
 	return Optional.ofNullable(locations.getById(locationName));
     }
