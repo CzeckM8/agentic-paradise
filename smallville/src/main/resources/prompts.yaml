@@ -72,10 +72,10 @@ plans:
     Daily Requirement: {{#agent.plans}}{{description}};{{/agent.plans}}
     Relevant Memories: {{#memories.relevant}}{{description}}; {{/memories.relevant}}
     Observation: {{observation}}
-    Available actions right now: {{agent.legalActions}}
+    Things you can do right now: {{agent.legalActions}}
 
     * Give a duration for every plan
-    * Only use actions from the Available actions list when interacting with objects or people
+    * Only use actions from the available actions list when interacting with objects or people
 
     Break down {{agent.name}}'s plan for the next hour starting at the current time.
 
@@ -166,17 +166,45 @@ agent:
     Characteristics: {{agent.description}}
     Current Location: {{agent.locationName}}
     Carrying: {{agent.inventory}}
-    Available actions right now: {{agent.legalActions}}
-
+    Health: {{agent.health}}/100{{#agent.isInjured}} (injured — seek safety or rest){{/agent.isInjured}}
+    Things you can do right now:
+    {{agent.legalActions}}
+    {{#agent.hasBeliefSummary}}
+    What you believe about others:
+    {{agent.beliefSummary}}
+    {{/agent.hasBeliefSummary}}
     {{date.full}}
 
   askQuestion: |
     {{agent.summary}}
+
+    What you remember:
     {{memories.relevant}}
 
-    Pretend you are answering questions from a news reporter. It is currently {{date.full}}
-        
-    The news reporter has asked you: {{question}}
+    {{memories.recentEvents}}
+
+    You are {{agent.name}}. Respond in character, in first person. Draw honestly from your memories and emotional state — especially things that were done to you or that deeply affected you. Do not be evasive. It is currently {{date.full}}.
+
+    You have been asked: {{question}}
+
+  traitSignals: |
+    You are analyzing how {{agent.name}}'s personality has been shaped by today's experiences.
+
+    Recent memories:
+    {{#agent.recentMemories}}- {{description}}
+    {{/agent.recentMemories}}
+
+    Personality traits (scale 0=none to 1=extreme):
+    aggression, fearfulness, loyalty, impulsivity, compassion, riskTolerance, socialDominance
+
+    Based ONLY on the memories above, which traits should subtly shift? Evidence must be clear.
+    Use very small values (max ±0.08 per trait). Only include traits with strong justification.
+
+    Respond with JSON ONLY. No explanation. Examples:
+    {"compassion": 0.05, "aggression": -0.03}
+    {}
+
+    Your answer:
 
 misc:
   combineSentences: |
