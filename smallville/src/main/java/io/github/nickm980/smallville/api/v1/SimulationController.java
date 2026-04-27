@@ -51,7 +51,7 @@ public final class SimulationController {
     
     @Get("/ping")
     public void ping(Context ctx) {
-	ctx.status(200).json(Map.of("success", true, "ping", "pong"));
+	ctx.status(200).json(Map.of("success", true, "ping", "pong", "model", service.getLlmModelName()));
     }
     
     @Post("/memories/stream")
@@ -482,7 +482,15 @@ public final class SimulationController {
 	List<LocationStateResponse> locations = service.getAllLocations();
 	String time = SimulationTime.now().format(DateTimeFormatter.ofPattern("h:mm a"));
 
-	ctx.json(Map.of("agents", agentDeltas, "location_states", locations, "time", time));
+	List<Map<String, Object>> npcSpeeches = service.drainNpcSpeeches();
+	List<Map<String, Object>> npcActions  = service.drainNpcActions();
+	Map<String, Object> deltaResponse = new java.util.LinkedHashMap<>();
+	deltaResponse.put("agents", agentDeltas);
+	deltaResponse.put("location_states", locations);
+	deltaResponse.put("time", time);
+	deltaResponse.put("npc_speeches", npcSpeeches);
+	deltaResponse.put("npc_actions", npcActions);
+	ctx.json(deltaResponse);
     }
 
     @Get("/llm/policy")
@@ -499,6 +507,23 @@ public final class SimulationController {
 	public void orchestrateRuntime(Context ctx) {
 	RuntimeOrchestrationRequest request = ctx.body().isBlank() ? new RuntimeOrchestrationRequest() : ctx.bodyAsClass(RuntimeOrchestrationRequest.class);
 	ctx.json(service.orchestrateRuntime(request));
+	}
+
+	@Post("/simulation/pause")
+	public void pauseSimulation(Context ctx) {
+		service.pauseSimulation();
+		ctx.json(Map.of("paused", true));
+	}
+
+	@Post("/simulation/resume")
+	public void resumeSimulation(Context ctx) {
+		service.resumeSimulation();
+		ctx.json(Map.of("paused", false));
+	}
+
+	@Get("/simulation/status")
+	public void simulationStatus(Context ctx) {
+		ctx.json(Map.of("paused", service.isSimulationPaused()));
 	}
 
 	@Get("/runtime/pending-events")

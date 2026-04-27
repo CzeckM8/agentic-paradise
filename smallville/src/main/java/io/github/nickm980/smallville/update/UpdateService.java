@@ -28,9 +28,16 @@ public class UpdateService {
     private final Logger LOG = LoggerFactory.getLogger(UpdateService.class);
     private final EventBus events = EventBus.getEventBus();
     
+    private final LLM llm;
+
     public UpdateService(LLM chat, World world) {
 	this.world = world;
+	this.llm = chat;
 	this.chatService = new ChatService(world, chat);
+    }
+
+    public LLM getLLM() {
+        return llm;
     }
 
     /**
