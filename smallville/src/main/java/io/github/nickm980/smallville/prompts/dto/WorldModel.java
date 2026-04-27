@@ -28,7 +28,15 @@ public class WorldModel {
 	    if (agent.getFullName().equals(name)) {
 		continue;
 	    }
-	    description += agent.getFullName() + " is " + agent.getCurrentActivity() + " at "
+	    String activity = agent.getCurrentActivity();
+	    // Sanitize internal game-engine activity strings so they read as natural language
+	    if (activity == null || activity.isBlank()
+		    || activity.startsWith("agentic:") || activity.startsWith("Agentic")
+		    || activity.contains("IDLE") || activity.contains("TOOL_ACTION")
+		    || activity.contains("blocked")) {
+		activity = "going about their business";
+	    }
+	    description += agent.getFullName() + " is " + activity + " at "
 		    + agent.getLocation().getFullPath() + " ";
 	}
 

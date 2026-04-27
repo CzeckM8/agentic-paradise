@@ -76,11 +76,13 @@ public class ChatService implements Prompts {
 
     @Override
     public String ask(Agent agent, String question) {
+	String eventContext = new TemplateMapper().buildEventContext(agent);
 	PromptRequest prompt = new PromptBuilder()
 	    .withObservation(question.replace("?", ""))
 	    .withQuestion(question)
 	    .withLocations(world.getLocations())
 	    .withAgent(agent)
+	    .withEventContext(eventContext)
 	    .setPrompt(SmallvilleConfig.getPrompts().getAgent().getAskQuestion())
 	    .build();
 

@@ -97,6 +97,11 @@ public class PromptBuilder {
 	return this;
     }
 
+    public PromptBuilder withEventContext(String context) {
+	data.put("memories.recentEvents", context != null ? context : "");
+	return this;
+    }
+
     public PromptBuilder withTense(String tenses) {
 	data.put("tenses", tenses);
 	return this;

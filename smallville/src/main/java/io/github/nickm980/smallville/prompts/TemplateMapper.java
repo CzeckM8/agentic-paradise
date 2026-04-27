@@ -1,10 +1,14 @@
 package io.github.nickm980.smallville.prompts;
 
 import java.time.LocalDateTime;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+
+import io.github.nickm980.smallville.entities.EpistemicMemory;
+import io.github.nickm980.smallville.memory.Memory;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,7 +50,10 @@ public class TemplateMapper {
 	}
 
 	result.put("name", agent.getFullName());
-	result.put("memories", agent.getMemoryStream().getMemories().stream().limit(10).collect(Collectors.toList()));
+	result.put("memories", agent.getMemoryStream().getMemories().stream()
+	    .filter(m -> !m.getDescription().contains("tile coordinates")
+	             && !m.getDescription().matches(".*\\(\\d+,\\s*\\d+\\).*"))
+	    .limit(10).collect(Collectors.toList()));
 	result.put("activity", agent.getCurrentActivity());
 	result.put("lastActivity", agent.getLastActivity());
 	result.put("summary", buildAgentSummary(agent));
@@ -73,6 +80,15 @@ public class TemplateMapper {
 		? "wait"
 		: String.join(", ", legal));
 	result.put("hasLegalActions", legal != null && !legal.isEmpty());
+
+	// Belief summary: theory-of-mind narrative, set by SimulationService.refreshBeliefModels()
+	String belief = agent.getBeliefSummary();
+	result.put("beliefSummary", belief == null || belief.isBlank() ? "" : belief);
+	result.put("hasBeliefSummary", belief != null && !belief.isBlank());
+
+	// Health state
+	result.put("health", agent.getHealth());
+	result.put("isInjured", agent.getHealth() < 70);
 
 	return result;
     }
@@ -113,6 +129,50 @@ public class TemplateMapper {
 	result.replace("$name", name);
 
 	return result;
+    }
+
+    /**
+     * Builds a plain-text block of high-impact events for injection into
+     * dialogue prompts so agents can authentically recall what happened to them.
+     * Pulls from three sources: EpistemicMemory attacks, recent hearsay, and
+     * MemoryStream entries with importance >= 6.
+     */
+    public String buildEventContext(Agent agent) {
+        StringBuilder sb = new StringBuilder();
+
+        List<EpistemicMemory.ObservedEvent> attacks = agent.getEpistemicMemory()
+            .recentObserved(20).stream()
+            .filter(e -> "attack".equals(e.verb)
+                && (agent.getFullName().equals(e.targetId) || agent.getFullName().equals(e.actorId)))
+            .collect(Collectors.toList());
+        if (!attacks.isEmpty()) {
+            sb.append("Combat events you experienced:\n");
+            for (EpistemicMemory.ObservedEvent evt : attacks) {
+                sb.append("- ").append(evt.toNarrative()).append("\n");
+            }
+        }
+
+        List<EpistemicMemory.Hearsay> heard = agent.getEpistemicMemory().recentHearsay(5);
+        if (!heard.isEmpty()) {
+            sb.append("Things you have been told:\n");
+            for (EpistemicMemory.Hearsay h : heard) {
+                sb.append("- ").append(h.toNarrative()).append("\n");
+            }
+        }
+
+        List<Memory> highImpact = agent.getMemoryStream().getMemories().stream()
+            .filter(m -> m.getImportance() >= 6)
+            .sorted(Comparator.comparingDouble(m -> -m.getImportance()))
+            .limit(5)
+            .collect(Collectors.toList());
+        if (!highImpact.isEmpty()) {
+            sb.append("Significant things you remember:\n");
+            for (Memory m : highImpact) {
+                sb.append("- ").append(m.getDescription()).append("\n");
+            }
+        }
+
+        return sb.toString().trim();
     }
 
     public String buildRelevantMemories(Agent agent, String observation) {

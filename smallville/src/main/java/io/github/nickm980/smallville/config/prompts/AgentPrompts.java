@@ -7,6 +7,7 @@ public class AgentPrompts {
     private String askQuestion;
     private String reflectionQuestion;
     private String reflectionResult;
+    private String traitSignals;
 
     public String getReflectionQuestion() {
 	return reflectionQuestion;
@@ -46,5 +47,13 @@ public class AgentPrompts {
 
     public void setSummary(String summary) {
 	this.summary = summary;
+    }
+
+    public String getTraitSignals() {
+	return traitSignals;
+    }
+
+    public void setTraitSignals(String traitSignals) {
+	this.traitSignals = traitSignals;
     }
 }
