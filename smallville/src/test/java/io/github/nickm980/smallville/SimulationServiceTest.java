@@ -21,6 +21,7 @@ import io.github.nickm980.smallville.entities.Agent;
 import io.github.nickm980.smallville.entities.AgentAction;
 import io.github.nickm980.smallville.entities.Location;
 import io.github.nickm980.smallville.llm.ChatGPT;
+import io.github.nickm980.smallville.llm.tools.ToolCallResponse;
 
 public class SimulationServiceTest {
 
@@ -31,6 +32,8 @@ public class SimulationServiceTest {
     public void setUp() {
 	ChatGPT llm = Mockito.mock(ChatGPT.class);
 	Mockito.when(llm.sendChat(Mockito.any(), Mockito.anyInt())).thenReturn("result");
+	Mockito.when(llm.sendChatWithTools(Mockito.any(), Mockito.any(), Mockito.anyDouble()))
+	    .thenReturn(ToolCallResponse.ofText(""));
 	world = new World();
 	service = new SimulationService(llm, world);
     }
