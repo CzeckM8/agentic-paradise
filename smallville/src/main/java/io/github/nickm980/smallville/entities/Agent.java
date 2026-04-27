@@ -26,6 +26,16 @@ public class Agent {
     private double compassion;
     private double riskTolerance;
     private double socialDominance;
+
+    /**
+     * Mutable trait adjustments accumulated from end-of-day reflection.
+     * Each entry is bounded to [-0.3, +0.3] to prevent runaway drift.
+     * Individual per-reflection signals are capped at ±0.1.
+     * The effective trait value = clamp01(base + delta).
+     */
+    private final Map<String, Double> traitDeltas = new HashMap<>();
+    private int health = 100;
+    private static final int MAX_HEALTH = 100;
     private double x = 0.0;
     private double y = 0.0;
     private boolean hasBeenOrchestrated = false; // Prevents movement on first turn after creation
@@ -53,11 +63,58 @@ public class Agent {
     private List<String> legalActions = new ArrayList<>();
 
     /**
+     * Transient: narrative summary of what this agent believes about other agents.
+     * Set by SimulationService.refreshBeliefModels() before each LLM planning call.
+     * Empty string when no beliefs have been established yet.
+     * Not persisted; regenerated each turn from AgenticRuntimeState.beliefModels.
+     */
+    private String beliefSummary = "";
+
+    /**
      * What this agent believes to be true about the world.
      * Populated only from PerceptionChannel and BeliefCorrections —
      * never from raw Chronicle data.
      */
     private final EpistemicMemory epistemicMemory = new EpistemicMemory();
+
+    /**
+     * Mental map: last-known position of every world object and agent.
+     * Seeded at turn 0 with the full world state so agents know where things
+     * are without having visited them. Updated by scan_nearby observations.
+     * Stale entries are intentional — agents may act on outdated knowledge.
+     *
+     * Key: objectId or agentName.
+     * Value: {id, name, type, x, y, tx, ty, location, turn}.
+     */
+    private final Map<String, Map<String, Object>> spatialKnowledge = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public Map<String, Map<String, Object>> getSpatialKnowledge() { return spatialKnowledge; }
+
+    public void updateSpatialKnowledge(String id, String name, String type,
+                                       double x, double y, String location, int turn) {
+        Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("id", id);
+        entry.put("name", name);
+        entry.put("type", type);
+        entry.put("tx", (int)(x / 32.0));
+        entry.put("ty", (int)(y / 32.0));
+        entry.put("location", location != null ? location : "unknown");
+        entry.put("turn", turn);
+        spatialKnowledge.put(id, entry);
+    }
+
+    public List<Map<String, Object>> querySpatialKnowledge(String query) {
+        if (query == null || query.isBlank()) {
+            return new java.util.ArrayList<>(spatialKnowledge.values());
+        }
+        String lower = query.toLowerCase();
+        return spatialKnowledge.values().stream()
+            .filter(e -> String.valueOf(e.getOrDefault("name", "")).toLowerCase().contains(lower)
+                || String.valueOf(e.getOrDefault("id", "")).toLowerCase().contains(lower)
+                || String.valueOf(e.getOrDefault("type", "")).toLowerCase().contains(lower)
+                || String.valueOf(e.getOrDefault("location", "")).toLowerCase().contains(lower))
+            .collect(java.util.stream.Collectors.toList());
+    }
     
     public Agent(String name, List<Characteristic> characteristics, String currentAction, Location location) {
 	this.name = name;
@@ -146,34 +203,46 @@ public class Agent {
 	return traits;
     }
 
-    public double getAggression() {
-	return aggression;
+    // ── Trait getters (effective = base + accumulated reflection delta) ─────────
+
+    public double getAggression()     { return clamp01(aggression     + traitDeltas.getOrDefault("aggression",     0.0)); }
+    public double getFearfulness()    { return clamp01(fearfulness    + traitDeltas.getOrDefault("fearfulness",    0.0)); }
+    public double getLoyalty()        { return clamp01(loyalty        + traitDeltas.getOrDefault("loyalty",        0.0)); }
+    public double getImpulsivity()    { return clamp01(impulsivity    + traitDeltas.getOrDefault("impulsivity",    0.0)); }
+    public double getCompassion()     { return clamp01(compassion     + traitDeltas.getOrDefault("compassion",     0.0)); }
+    public double getRiskTolerance()  { return clamp01(riskTolerance  + traitDeltas.getOrDefault("riskTolerance",  0.0)); }
+    public double getSocialDominance(){ return clamp01(socialDominance+ traitDeltas.getOrDefault("socialDominance",0.0)); }
+
+    /**
+     * Apply a trait delta from end-of-day reflection.
+     * Individual signals are capped at ±0.1; the running cumulative total per
+     * trait is capped at ±0.3 to prevent extreme drift across many days.
+     *
+     * @param traitName one of: aggression, fearfulness, loyalty, impulsivity,
+     *                  compassion, riskTolerance, socialDominance
+     * @param delta     the suggested change (LLM output, typically ±0.02–0.10)
+     */
+    public void applyTraitDelta(String traitName, double delta) {
+        if (traitName == null || traitName.isBlank()) return;
+        if (delta == 0.0) return;                                     // no-op; don't pollute map
+        double capped = Math.min(0.1, Math.max(-0.1, delta));        // per-signal cap
+        double current = traitDeltas.getOrDefault(traitName, 0.0);
+        double next = Math.min(0.3, Math.max(-0.3, current + capped)); // cumulative cap
+        traitDeltas.put(traitName, next);
     }
 
-    public double getFearfulness() {
-	return fearfulness;
+    /** Returns an unmodifiable view of current trait deltas, keyed by trait name. */
+    public Map<String, Double> getTraitDeltas() {
+        return java.util.Collections.unmodifiableMap(traitDeltas);
     }
 
-    public double getLoyalty() {
-	return loyalty;
-    }
+    private static double clamp01(double v) { return Math.min(1.0, Math.max(0.0, v)); }
 
-    public double getImpulsivity() {
-	return impulsivity;
-    }
+    public int getHealth() { return health; }
+    public boolean isIncapacitated() { return health <= 0; }
+    public void applyDamage(int amount) { health = Math.max(0, health - amount); }
+    public void recoverHealth(int amount) { health = Math.min(MAX_HEALTH, health + amount); }
 
-    public double getCompassion() {
-	return compassion;
-    }
-
-    public double getRiskTolerance() {
-	return riskTolerance;
-    }
-
-    public double getSocialDominance() {
-	return socialDominance;
-    }
-    
     public double getStressLevel() {
         return this.currentAction.getStressLevel();
     }
@@ -342,6 +411,16 @@ public class Agent {
 
     public void setLegalActions(List<String> legalActions) {
         this.legalActions = legalActions == null ? new ArrayList<>() : legalActions;
+    }
+
+    // ── Belief summary (theory of mind — transient) ───────────────────────────
+
+    public String getBeliefSummary() {
+        return beliefSummary;
+    }
+
+    public void setBeliefSummary(String beliefSummary) {
+        this.beliefSummary = beliefSummary == null ? "" : beliefSummary;
     }
 
     // ── Epistemic memory ─────────────────────────────────────────────────────

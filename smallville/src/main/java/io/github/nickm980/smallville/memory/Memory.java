@@ -26,10 +26,29 @@ public abstract class Memory implements Comparable<Memory> {
 	int a1 = 1;
 	int a2 = 1;
 	int a3 = 1;
-	double score = a1 * getRecency() + a2 * getImportance() + a3 * getRelevancy(observation);
+	double relevancy = getRelevancy(observation);
+	double score = a1 * getRecency() + a2 * getImportance() + a3 * relevancy;
 
-	if (Double.isNaN(score)) {
-	    score = getRelevancy(observation);
+	// Recover from NaN/Inf before applying the keyword boost — if recency produces
+	// NaN (e.g. SimulationTime not yet initialised in tests), fall back to relevancy.
+	if (!Double.isFinite(score)) {
+	    score = Double.isFinite(relevancy) ? relevancy : 0.0;
+	}
+
+	// Keyword-match boost: BERT cosine similarity on short phrases is unreliable —
+	// exact and substring matches must reliably outrank semantically-nearby but
+	// unrelated content. Boosts are additive on top of the base score.
+	String query = observation.toLowerCase().trim();
+	String desc = description.toLowerCase();
+	if (!query.isBlank()) {
+	    if (desc.equals(query)) {
+		score += 1.0;          // exact match
+	    } else if (desc.startsWith(query + " ") || desc.contains(" " + query + " ")
+		    || desc.endsWith(" " + query)) {
+		score += 0.8;          // whole-word match (query is its own token)
+	    } else if (desc.contains(query)) {
+		score += 0.6;          // substring match
+	    }
 	}
 
 	return score;
