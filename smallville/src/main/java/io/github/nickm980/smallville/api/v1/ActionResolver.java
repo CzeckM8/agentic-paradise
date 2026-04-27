@@ -163,11 +163,24 @@ public class ActionResolver {
     private ResolveResult resolveEntityAction(WorldAction action) {
         String verb = action.getVerb();
 
-        // For speak, attack, give: range is checked against the entity position.
-        // We accept these as permitted at the resolver level (the simulation layer
-        // handles dialogue turns and social outcomes). Future: look up entity tile
-        // position from world state for strict range enforcement.
+        // give: actor must hold the item specified in action.getItemId()
+        if ("give".equals(verb)) {
+            String itemId = action.getItemId();
+            if (itemId == null || itemId.isBlank()) {
+                return ResolveResult.reject(RejectReason.AFFORDANCE_DENIED,
+                        "give requires an itemId (the item to hand over)");
+            }
+            Map<String, InventoryItem> inventory = inventoryByActor.getOrDefault(
+                    action.getActorId(), Map.of());
+            if (!inventory.containsKey(itemId)) {
+                return ResolveResult.reject(RejectReason.MISSING_GRANT,
+                        "'" + action.getActorId() + "' does not hold item '" + itemId + "'");
+            }
+            return ResolveResult.permit();
+        }
 
+        // For speak, attack: range is checked against the entity position at the
+        // simulation layer; ActionResolver permits all other entity-targeted verbs.
         if (VERB_REQUIRES_GRANT.containsKey(verb)) {
             return checkGenericGrant(action, verb);
         }
@@ -280,7 +293,8 @@ public class ActionResolver {
 
     /**
      * Structured descriptor for one legal action. Used by the client endpoint
-     * so the client doesn't have to parse "verb(name)" strings.
+     * so the client doesn't have to parse "verb(name)" strings, and by the LLM
+     * prompt builder so agents understand *why* each action is available.
      */
     public static class ActionDescriptor {
         public final String verb;
@@ -288,14 +302,17 @@ public class ActionResolver {
         public final String targetName;
         public final String targetKind; // "object", "agent"
         public final String label;
+        /** Human-readable context for LLM: distance, required item, state. */
+        public final String reason;
 
         public ActionDescriptor(String verb, String targetId, String targetName,
-                                String targetKind, String label) {
+                                String targetKind, String label, String reason) {
             this.verb = verb;
             this.targetId = targetId;
             this.targetName = targetName;
             this.targetKind = targetKind;
             this.label = label;
+            this.reason = reason;
         }
 
         public java.util.Map<String, String> toMap() {
@@ -305,8 +322,44 @@ public class ActionResolver {
             m.put("targetName", targetName);
             m.put("targetKind", targetKind);
             m.put("label", label);
+            if (reason != null && !reason.isEmpty()) m.put("reason", reason);
             return m;
         }
+    }
+
+    /**
+     * Position-aware overload: filters tackle to agents that are NOT adjacent (≥2 tiles).
+     * Used by SimulationService when agent positions are available.
+     *
+     * @param nearbyAgents map of agentId → [x, y]
+     */
+    public List<ActionDescriptor> legalDescriptorsFor(String actorId, double actorX, double actorY,
+                                                      Map<String, double[]> nearbyAgents) {
+        // Build base descriptors via the list overload (handles speak/punch/kick/throw/give/tackle)
+        // then strip tackle entries for adjacent targets and re-add only for 2+ tile targets.
+        List<String> ids = new ArrayList<>(nearbyAgents.keySet());
+        List<ActionDescriptor> base = legalDescriptorsFor(actorId, actorX, actorY, ids);
+
+        // Remove tackle entries (they were added without distance filtering in the list overload)
+        base.removeIf(d -> "tackle".equals(d.verb));
+
+        // Re-add tackle only for non-adjacent targets
+        for (Map.Entry<String, double[]> entry : nearbyAgents.entrySet()) {
+            String entityId = entry.getKey();
+            double[] pos = entry.getValue();
+            int dist = tileManhattanDist(actorX, actorY, pos[0], pos[1]);
+            if (dist >= 2) {
+                base.add(new ActionDescriptor("tackle", entityId, entityId, "agent", "Tackle",
+                        dist + " tiles, closes to adjacent"));
+            }
+        }
+        return base;
+    }
+
+    private int tileManhattanDist(double ax, double ay, double bx, double by) {
+        int dx = Math.abs((int) Math.floor(ax / TILE_SIZE) - (int) Math.floor(bx / TILE_SIZE));
+        int dy = Math.abs((int) Math.floor(ay / TILE_SIZE) - (int) Math.floor(by / TILE_SIZE));
+        return dx + dy;
     }
 
     /**
@@ -325,24 +378,29 @@ public class ActionResolver {
             double distTiles = Math.sqrt(dx * dx + dy * dy) / TILE_SIZE;
             if (distTiles > DEFAULT_INTERACTION_RANGE_TILES) continue;
 
+            String distStr = distTiles <= 1.0 ? "adjacent" : distTiles <= 2.0 ? "nearby" : "close by";
             Map<String, Object> props = mergedProperties(obj);
             String id = obj.getInstanceId();
             String name = obj.getName();
 
             if (Boolean.TRUE.equals(props.get("interactive"))) {
-                descriptors.add(new ActionDescriptor("inspect", id, name, "object", "Inspect"));
+                descriptors.add(new ActionDescriptor("inspect", id, name, "object", "Inspect",
+                        distStr + ", interactive"));
             }
 
             if (Boolean.TRUE.equals(props.get("can_open_close"))) {
                 if (!obj.isOpen()) {
                     if (!obj.isLocked()) {
-                        descriptors.add(new ActionDescriptor("open", id, name, "object", "Open"));
+                        descriptors.add(new ActionDescriptor("open", id, name, "object", "Open",
+                                distStr + ", closed"));
                     } else {
                         boolean hasKey = inventory.values().stream().anyMatch(i -> i.opensInstance(id));
-                        if (hasKey) descriptors.add(new ActionDescriptor("open", id, name, "object", "Open"));
+                        if (hasKey) descriptors.add(new ActionDescriptor("open", id, name, "object", "Open",
+                                distStr + ", locked — you hold the key"));
                     }
                 } else {
-                    descriptors.add(new ActionDescriptor("close", id, name, "object", "Close"));
+                    descriptors.add(new ActionDescriptor("close", id, name, "object", "Close",
+                            distStr + ", open"));
                 }
             }
 
@@ -352,46 +410,90 @@ public class ActionResolver {
                 if (locked) {
                     boolean hasKey = inventory.values().stream().anyMatch(i -> i.opensInstance(id));
                     if (hasKey) {
-                        descriptors.add(new ActionDescriptor("unlock", id, name, "object", "Unlock"));
+                        descriptors.add(new ActionDescriptor("unlock", id, name, "object", "Unlock",
+                                distStr + ", you hold the matching key"));
                     }
                 } else {
                     boolean hasKey = !inventory.isEmpty() && inventory.values().stream()
                             .anyMatch(i -> i.hasGrant("key") || i.opensInstance(id));
                     if (hasKey) {
-                        descriptors.add(new ActionDescriptor("lock", id, name, "object", "Lock"));
+                        descriptors.add(new ActionDescriptor("lock", id, name, "object", "Lock",
+                                distStr + ", you hold a key"));
                     }
                 }
             }
 
             if (Boolean.TRUE.equals(props.get("carriable")) && !obj.isCarried()) {
-                descriptors.add(new ActionDescriptor("carry", id, name, "object", "Carry"));
+                descriptors.add(new ActionDescriptor("carry", id, name, "object", "Carry",
+                        distStr + ", carriable"));
             }
 
             if (Boolean.TRUE.equals(props.get("writable"))) {
                 boolean hasTool = inventory.values().stream().anyMatch(i -> i.hasGrant("writing_utensil"));
-                if (hasTool) descriptors.add(new ActionDescriptor("write", id, name, "object", "Write"));
+                if (hasTool) descriptors.add(new ActionDescriptor("write", id, name, "object", "Write",
+                        distStr + ", you hold a writing utensil"));
+            }
+
+            if (Boolean.TRUE.equals(props.get("flat_surface")) && !inventory.isEmpty()) {
+                descriptors.add(new ActionDescriptor("place_object", id, name, "object", "Place Item",
+                        distStr + ", flat surface — you are carrying something"));
             }
         }
 
+        Map<String, InventoryItem> actorInventory = inventoryByActor.getOrDefault(actorId, Map.of());
+
         for (String entityId : nearbyAgentIds) {
-            descriptors.add(new ActionDescriptor("speak", entityId, entityId, "agent", "Talk"));
+            descriptors.add(new ActionDescriptor("speak", entityId, entityId, "agent", "Talk",
+                    "in range"));
+            descriptors.add(new ActionDescriptor("punch", entityId, entityId, "agent", "Punch",
+                    "adjacent only"));
+            descriptors.add(new ActionDescriptor("kick", entityId, entityId, "agent", "Kick",
+                    "adjacent only, more damage"));
+            descriptors.add(new ActionDescriptor("tackle", entityId, entityId, "agent", "Tackle",
+                    "2–4 tiles, closes distance"));
+            if (!actorInventory.isEmpty()) {
+                descriptors.add(new ActionDescriptor("throw", entityId, entityId, "agent", "Throw at",
+                        "you have items to throw"));
+            }
+            // give: one entry per (agent × carried item) so the LLM knows item + recipient
+            for (InventoryItem item : actorInventory.values()) {
+                // targetName encodes "RecipientName,ItemName" — SimulationService splits on ','
+                String compoundTarget = entityId + "," + item.getDisplayName();
+                descriptors.add(new ActionDescriptor("give", entityId, compoundTarget, "agent",
+                        "Give " + item.getDisplayName() + " to " + entityId,
+                        "you hold " + item.getDisplayName()));
+            }
         }
 
-        descriptors.add(new ActionDescriptor("wait", "", "", "none", "Wait"));
+        descriptors.add(new ActionDescriptor("wait", "", "", "none", "Wait", "always available"));
         return descriptors;
     }
 
     /**
-     * Returns a list of human-readable legal action descriptions for a given actor.
-     * Includes object interactions (filtered by affordance + inventory), speak
-     * actions for nearby agents, and always includes "wait" as a fallback.
+     * Returns a list of human-readable legal action descriptions for a given actor,
+     * with context explaining why each action is available. Format:
+     * "carry(KeyCard) [0.8 tiles, carriable]"
      *
      * Used by the LLM prompt builder to constrain NPC plan generation.
      */
     public List<String> legalActionsFor(String actorId, double actorX, double actorY,
                                         List<String> nearbyAgentIds) {
         return legalDescriptorsFor(actorId, actorX, actorY, nearbyAgentIds).stream()
-                .map(d -> d.targetId.isEmpty() ? d.verb : d.verb + "(" + d.targetName + ")")
+                .map(d -> {
+                    String base = d.targetId.isEmpty() ? d.verb : d.verb + "(" + d.targetName + ")";
+                    return (d.reason != null && !d.reason.isEmpty()) ? base + " [" + d.reason + "]" : base;
+                })
+                .collect(Collectors.toList());
+    }
+
+    /** Position-aware overload — filters tackle to non-adjacent targets. */
+    public List<String> legalActionsFor(String actorId, double actorX, double actorY,
+                                        Map<String, double[]> nearbyAgents) {
+        return legalDescriptorsFor(actorId, actorX, actorY, nearbyAgents).stream()
+                .map(d -> {
+                    String base = d.targetId.isEmpty() ? d.verb : d.verb + "(" + d.targetName + ")";
+                    return (d.reason != null && !d.reason.isEmpty()) ? base + " [" + d.reason + "]" : base;
+                })
                 .collect(Collectors.toList());
     }
 

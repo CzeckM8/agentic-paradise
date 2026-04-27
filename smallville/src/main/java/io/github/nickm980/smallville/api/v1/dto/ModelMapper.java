@@ -32,6 +32,8 @@ public class ModelMapper {
 	result.setTargetLocation(agent.getTargetLocation());
 	result.setActiveAction(fromAgentAction(agent.getActiveAction()));
 	result.setQueuedActions(agent.getQueuedActions().stream().map(this::fromAgentAction).toList());
+	result.setHealth(agent.getHealth());
+	result.setIncapacitated(agent.isIncapacitated());
 	return result;
     }
 
@@ -45,6 +47,8 @@ public class ModelMapper {
 	result.setEmoji(agent.getEmoji());
 	result.setStressLevel(agent.getStressLevel());
 	result.setMentalState(agent.getMentalState());
+	result.setHealth(agent.getHealth());
+	result.setIncapacitated(agent.isIncapacitated());
 	return result;
     }
 

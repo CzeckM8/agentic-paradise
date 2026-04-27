@@ -17,6 +17,8 @@ public class AgentStateResponse {
     private List<AgentActionStateResponse> queuedActions;
     /** Full property data for each carried world-object (mirrors PlayerStateResponse.inventoryObjects). */
     private List<Map<String, Object>> inventoryObjects = Collections.emptyList();
+    private int health = 100;
+    private boolean incapacitated = false;
 
     public String getObject() {
 	return object;
@@ -100,4 +102,10 @@ public class AgentStateResponse {
     public void setInventoryObjects(List<Map<String, Object>> inventoryObjects) {
         this.inventoryObjects = inventoryObjects;
     }
+
+    public int getHealth() { return health; }
+    public void setHealth(int health) { this.health = health; }
+
+    public boolean isIncapacitated() { return incapacitated; }
+    public void setIncapacitated(boolean incapacitated) { this.incapacitated = incapacitated; }
 }

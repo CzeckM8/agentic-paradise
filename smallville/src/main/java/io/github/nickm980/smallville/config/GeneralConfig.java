@@ -11,6 +11,14 @@ public class GeneralConfig {
     private boolean simulationFile;
     private int maxRetries;
 
+    // ── Agentic tool loop settings ────────────────────────────────────────────
+    /** Tick interval in ms for the global simulation clock. Default: 3000 */
+    private int simulationTickMs = 3000;
+    /** Max tool-call iterations per agent turn. Default: 5 */
+    private int agenticMaxIterations = 5;
+    /** Wall-clock deadline per turn in ms (0 = no deadline). Default: 8000 */
+    private int agenticTurnDeadlineMs = 8000;
+
     public boolean isSimulationFile() {
 	return simulationFile;
     }
@@ -73,6 +81,30 @@ public class GeneralConfig {
 
     public void setMaxRetries(int maxRetries) {
 	this.maxRetries = maxRetries;
+    }
+
+    public int getSimulationTickMs() {
+        return simulationTickMs;
+    }
+
+    public void setSimulationTickMs(int simulationTickMs) {
+        this.simulationTickMs = simulationTickMs;
+    }
+
+    public int getAgenticMaxIterations() {
+        return agenticMaxIterations;
+    }
+
+    public void setAgenticMaxIterations(int agenticMaxIterations) {
+        this.agenticMaxIterations = agenticMaxIterations;
+    }
+
+    public int getAgenticTurnDeadlineMs() {
+        return agenticTurnDeadlineMs;
+    }
+
+    public void setAgenticTurnDeadlineMs(int agenticTurnDeadlineMs) {
+        this.agenticTurnDeadlineMs = agenticTurnDeadlineMs;
     }
 
 }

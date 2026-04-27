@@ -15,6 +15,8 @@ public class AgentDeltaStateResponse {
     private String mentalState;
     private double x;
     private double y;
+    private int health = 100;
+    private boolean incapacitated = false;
 
     public AgentDeltaStateResponse() {}
 
@@ -110,4 +112,10 @@ public class AgentDeltaStateResponse {
     public void setY(double y) {
         this.y = y;
     }
+
+    public int getHealth() { return health; }
+    public void setHealth(int health) { this.health = health; }
+
+    public boolean isIncapacitated() { return incapacitated; }
+    public void setIncapacitated(boolean incapacitated) { this.incapacitated = incapacitated; }
 }
