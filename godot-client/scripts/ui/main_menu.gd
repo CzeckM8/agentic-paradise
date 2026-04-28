@@ -263,7 +263,24 @@ func _read_save_slots() -> Dictionary:
 	return result
 
 func _save_root_path() -> String:
-	return ProjectSettings.globalize_path("res://../smallville/saves")
+	var canonical_path = ProjectSettings.globalize_path("res://../smallville/saves")
+	var target_path = ProjectSettings.globalize_path("res://../smallville/target/saves")
+	var legacy_path = ProjectSettings.globalize_path("res://../saves")
+	if _directory_has_any_save_files(canonical_path):
+		return canonical_path
+	if _directory_has_any_save_files(target_path):
+		return target_path
+	if _directory_has_any_save_files(legacy_path):
+		return legacy_path
+	return canonical_path
+
+func _directory_has_any_save_files(path: String) -> bool:
+	for slot_id in ["slot-1", "slot-2", "slot-3"]:
+		var save_path = path.path_join(slot_id).path_join("save.json")
+		var metadata_path = path.path_join(slot_id).path_join("metadata.json")
+		if FileAccess.file_exists(save_path) or FileAccess.file_exists(metadata_path):
+			return true
+	return false
 
 func _slot_display_name(slot_id: String) -> String:
 	match slot_id:

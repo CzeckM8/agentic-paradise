@@ -53,6 +53,20 @@ public class EpistemicMemory {
             this.observedAt = LocalDateTime.now();
         }
 
+        public ObservedEvent(String chronicleEventId, int turnNumber, String actorId,
+                String verb, String targetId, String payload, double actorX,
+                double actorY, LocalDateTime observedAt) {
+            this.chronicleEventId = chronicleEventId;
+            this.turnNumber = turnNumber;
+            this.actorId = actorId;
+            this.verb = verb;
+            this.targetId = targetId;
+            this.payload = payload;
+            this.actorX = actorX;
+            this.actorY = actorY;
+            this.observedAt = observedAt;
+        }
+
         /** Narrative description for LLM prompt injection. */
         public String toNarrative() {
             String base = String.format("(turn %d) %s %s %s", turnNumber, actorId, verb, targetId);
@@ -80,6 +94,16 @@ public class EpistemicMemory {
             this.turnNumber = turnNumber;
             this.confidence = confidence;
             this.receivedAt = LocalDateTime.now();
+        }
+
+        public Hearsay(String id, String sourceActorId, String content, int turnNumber,
+                double confidence, LocalDateTime receivedAt) {
+            this.id = id;
+            this.sourceActorId = sourceActorId;
+            this.content = content;
+            this.turnNumber = turnNumber;
+            this.confidence = confidence;
+            this.receivedAt = receivedAt;
         }
 
         public String toNarrative() {
@@ -120,6 +144,19 @@ public class EpistemicMemory {
             this.createdAt = LocalDateTime.now();
         }
 
+        public BeliefCorrection(String id, int turnNumber, String attemptedVerb, String targetId,
+                                RejectReason rejectReason, String believed, String reality,
+                                LocalDateTime createdAt) {
+            this.id = id;
+            this.turnNumber = turnNumber;
+            this.attemptedVerb = attemptedVerb;
+            this.targetId = targetId;
+            this.rejectReason = rejectReason;
+            this.believed = believed;
+            this.reality = reality;
+            this.createdAt = createdAt;
+        }
+
         /** Narrative for LLM reflection prompt. */
         public String toReflectionPrompt() {
             return String.format(
@@ -135,6 +172,44 @@ public class EpistemicMemory {
     private final Deque<ObservedEvent> observed = new ArrayDeque<>();
     private final Deque<Hearsay> hearsay = new ArrayDeque<>();
     private final Deque<BeliefCorrection> corrections = new ArrayDeque<>();
+
+    public static class Snapshot {
+        public List<ObservedEventSnapshot> observed = new ArrayList<>();
+        public List<HearsaySnapshot> hearsay = new ArrayList<>();
+        public List<BeliefCorrectionSnapshot> corrections = new ArrayList<>();
+    }
+
+    public static class ObservedEventSnapshot {
+        public String chronicleEventId;
+        public int turnNumber;
+        public String actorId;
+        public String verb;
+        public String targetId;
+        public String payload;
+        public double actorX;
+        public double actorY;
+        public LocalDateTime observedAt;
+    }
+
+    public static class HearsaySnapshot {
+        public String id;
+        public String sourceActorId;
+        public String content;
+        public int turnNumber;
+        public LocalDateTime receivedAt;
+        public double confidence;
+    }
+
+    public static class BeliefCorrectionSnapshot {
+        public String id;
+        public int turnNumber;
+        public String attemptedVerb;
+        public String targetId;
+        public RejectReason rejectReason;
+        public String believed;
+        public String reality;
+        public LocalDateTime createdAt;
+    }
 
     // ── Ingest methods (called by PerceptionChannel / ActionResolver) ─────────
 
@@ -187,6 +262,93 @@ public class EpistemicMemory {
 
     public void clearCorrections() {
         corrections.clear();
+    }
+
+    public Snapshot snapshot() {
+        Snapshot snapshot = new Snapshot();
+        for (ObservedEvent event : observed) {
+            ObservedEventSnapshot item = new ObservedEventSnapshot();
+            item.chronicleEventId = event.chronicleEventId;
+            item.turnNumber = event.turnNumber;
+            item.actorId = event.actorId;
+            item.verb = event.verb;
+            item.targetId = event.targetId;
+            item.payload = event.payload;
+            item.actorX = event.actorX;
+            item.actorY = event.actorY;
+            item.observedAt = event.observedAt;
+            snapshot.observed.add(item);
+        }
+        for (Hearsay entry : hearsay) {
+            HearsaySnapshot item = new HearsaySnapshot();
+            item.id = entry.id;
+            item.sourceActorId = entry.sourceActorId;
+            item.content = entry.content;
+            item.turnNumber = entry.turnNumber;
+            item.receivedAt = entry.receivedAt;
+            item.confidence = entry.confidence;
+            snapshot.hearsay.add(item);
+        }
+        for (BeliefCorrection correction : corrections) {
+            BeliefCorrectionSnapshot item = new BeliefCorrectionSnapshot();
+            item.id = correction.id;
+            item.turnNumber = correction.turnNumber;
+            item.attemptedVerb = correction.attemptedVerb;
+            item.targetId = correction.targetId;
+            item.rejectReason = correction.rejectReason;
+            item.believed = correction.believed;
+            item.reality = correction.reality;
+            item.createdAt = correction.createdAt;
+            snapshot.corrections.add(item);
+        }
+        return snapshot;
+    }
+
+    public void restore(Snapshot snapshot) {
+        observed.clear();
+        hearsay.clear();
+        corrections.clear();
+        if (snapshot == null) {
+            return;
+        }
+        if (snapshot.observed != null) {
+            for (ObservedEventSnapshot item : snapshot.observed) {
+                observed.addLast(new ObservedEvent(
+                        item.chronicleEventId,
+                        item.turnNumber,
+                        item.actorId,
+                        item.verb,
+                        item.targetId,
+                        item.payload,
+                        item.actorX,
+                        item.actorY,
+                        item.observedAt));
+            }
+        }
+        if (snapshot.hearsay != null) {
+            for (HearsaySnapshot item : snapshot.hearsay) {
+                hearsay.addLast(new Hearsay(
+                        item.id,
+                        item.sourceActorId,
+                        item.content,
+                        item.turnNumber,
+                        item.confidence,
+                        item.receivedAt));
+            }
+        }
+        if (snapshot.corrections != null) {
+            for (BeliefCorrectionSnapshot item : snapshot.corrections) {
+                corrections.addLast(new BeliefCorrection(
+                        item.id,
+                        item.turnNumber,
+                        item.attemptedVerb,
+                        item.targetId,
+                        item.rejectReason,
+                        item.believed,
+                        item.reality,
+                        item.createdAt));
+            }
+        }
     }
 
     public int observedCount() { return observed.size(); }

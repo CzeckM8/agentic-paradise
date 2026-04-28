@@ -51,6 +51,15 @@ public class ActionHistory {
 	this.mentalState = mentalState;
     }
 
+    public void restoreState(String activity, String lastActivity, String emoji,
+	    double stressLevel, String mentalState) {
+	this.activity = activity;
+	this.lastActivity = lastActivity == null ? activity : lastActivity;
+	this.emoji = emoji;
+	this.stressLevel = Math.max(0.0, Math.min(1.0, stressLevel));
+	this.mentalState = mentalState == null || mentalState.isBlank() ? this.mentalState : mentalState;
+    }
+
     /**
      * Updates mental state based on current stress level
      */

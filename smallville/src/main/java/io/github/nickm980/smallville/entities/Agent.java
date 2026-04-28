@@ -279,6 +279,18 @@ public class Agent {
         enqueueActions(actions);
     }
 
+    public void restoreActionQueue(AgentAction active, List<AgentAction> queued) {
+        activeAction = active == null ? null : active.copy();
+        actionQueue.clear();
+        if (queued != null) {
+            for (AgentAction action : queued) {
+                if (action != null) {
+                    actionQueue.addLast(action.copy());
+                }
+            }
+        }
+    }
+
     public AgentAction startNextAction() {
         if (activeAction != null) {
             return activeAction.copy();
@@ -342,6 +354,11 @@ public class Agent {
 
     public void setLegalActions(List<String> legalActions) {
         this.legalActions = legalActions == null ? new ArrayList<>() : legalActions;
+    }
+
+    public void restoreActionHistory(String activity, String lastActivity, String emoji,
+            double stressLevel, String mentalState) {
+        currentAction.restoreState(activity, lastActivity, emoji, stressLevel, mentalState);
     }
 
     // ── Epistemic memory ─────────────────────────────────────────────────────

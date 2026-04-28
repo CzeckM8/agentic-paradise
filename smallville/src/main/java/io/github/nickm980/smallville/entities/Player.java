@@ -70,4 +70,8 @@ public class Player extends Agent {
 	public void resetInteractions() {
 		this.numInteractions = 0;
 	}
+
+	public void setNumInteractions(int numInteractions) {
+		this.numInteractions = Math.max(0, numInteractions);
+	}
 }

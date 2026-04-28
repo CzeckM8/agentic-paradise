@@ -1725,6 +1725,7 @@ func _refresh_world_after_load():
 	_clear_client_world_for_load()
 	player_has_local_movement = false
 	force_player_position_sync_once = true
+	_reset_dialogue_ui_for_loaded_state()
 	await _fetch_locations_async()
 	await _fetch_state_snapshot_async()
 	await _fetch_agents_snapshot_async()
@@ -1748,6 +1749,25 @@ func _clear_client_world_for_load():
 	if object_overlays != null:
 		for child in object_overlays.get_children():
 			child.queue_free()
+
+func _reset_dialogue_ui_for_loaded_state():
+	active_dialogue_target = ""
+	_dialogue_signatures_seen.clear()
+	last_conversation_signature = ""
+	dialogue_request_in_flight = false
+	if dialogue_log != null:
+		dialogue_log.text = ""
+	if dialogue_input != null:
+		dialogue_input.text = ""
+		dialogue_input.release_focus()
+	if dialogue_send_button != null:
+		dialogue_send_button.disabled = false
+	if dialogue_target_label != null:
+		dialogue_target_label.text = "Talking to: (auto-nearest)"
+	if dialogue_status != null:
+		dialogue_status.text = "Click the input box to chat"
+	if dialogue_panel != null:
+		dialogue_panel.visible = false
 
 func _create_write_panel() -> void:
 	"""Build the write-text modal panel programmatically."""

@@ -40,11 +40,14 @@ import io.github.nickm980.smallville.exceptions.LocationNotFoundException;
 import io.github.nickm980.smallville.exceptions.SmallvilleException;
 import io.github.nickm980.smallville.llm.LLM;
 import io.github.nickm980.smallville.memory.Characteristic;
+import io.github.nickm980.smallville.memory.Commitment;
+import io.github.nickm980.smallville.memory.CommitmentStatus;
 import io.github.nickm980.smallville.memory.Memory;
 import io.github.nickm980.smallville.memory.MemoryStream;
 import io.github.nickm980.smallville.memory.Observation;
 import io.github.nickm980.smallville.memory.Plan;
 import io.github.nickm980.smallville.memory.PlanType;
+import io.github.nickm980.smallville.memory.Reflection;
 import io.github.nickm980.smallville.memory.TemporalMemory;
 import io.github.nickm980.smallville.save.SaveGame;
 import io.github.nickm980.smallville.save.SaveSlotSummary;
@@ -70,10 +73,11 @@ public class SimulationService {
 	private static final int MAX_SOCIAL_EPISODES_PER_TARGET = 12;
 	private static final int MAX_CONVERSATION_TURNS_PER_PAIR = 60;
 	private static final long SOCIAL_APPRAISAL_TTL_MINUTES = 20;
-	private static final int DEFAULT_PLAYER_AFFORDANCE_TILE_RADIUS = 4;
+    private static final int DEFAULT_PLAYER_AFFORDANCE_TILE_RADIUS = 4;
     private static final List<String> SAVE_SLOT_IDS = List.of("slot-1", "slot-2", "slot-3");
     private final Object saveLock = new Object();
-    private final Path savesDirectory = Path.of("saves");
+    private final Path savesDirectory = resolveCanonicalSavesDirectory();
+    private final List<Path> legacySavesDirectories = resolveLegacySavesDirectories(savesDirectory);
     private final ObjectMapper objectMapper = new ObjectMapper()
 	.registerModule(new JavaTimeModule())
 	.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
@@ -282,7 +286,67 @@ public class SimulationService {
 	this.mapper = new ModelMapper();
 	this.prompts = new UpdateService(llm, world);
 	this.progress = 0;
+	migrateLegacySavesIfNeeded();
 	seedDefaultObjectTypes();
+    }
+
+    private Path resolveCanonicalSavesDirectory() {
+	Path cwd = Path.of("").toAbsolutePath().normalize();
+	Path repoLocalSmallville = cwd.resolve("smallville");
+	if (Files.isDirectory(repoLocalSmallville)) {
+	    return repoLocalSmallville.resolve("saves");
+	}
+	return cwd.resolve("saves");
+    }
+
+    private List<Path> resolveLegacySavesDirectories(Path canonicalDirectory) {
+	Path cwd = Path.of("").toAbsolutePath().normalize();
+	Path repoLocalSmallville = cwd.resolve("smallville");
+	List<Path> candidates = new ArrayList<>();
+	if (Files.isDirectory(repoLocalSmallville)) {
+	    candidates.add(cwd.resolve("saves").normalize());
+	    candidates.add(repoLocalSmallville.resolve("target").resolve("saves").normalize());
+	} else {
+	    if (cwd.getParent() != null) {
+		candidates.add(cwd.getParent().resolve("saves").normalize());
+	    }
+	    candidates.add(cwd.resolve("target").resolve("saves").normalize());
+	}
+	return candidates.stream()
+	    .filter(path -> path != null && !path.equals(canonicalDirectory))
+	    .distinct()
+	    .collect(Collectors.toList());
+    }
+
+    private void migrateLegacySavesIfNeeded() {
+	for (Path legacySavesDirectory : legacySavesDirectories) {
+	    if (legacySavesDirectory == null || !Files.isDirectory(legacySavesDirectory)) {
+		continue;
+	    }
+	    try {
+		Files.createDirectories(savesDirectory);
+		for (String slotId : SAVE_SLOT_IDS) {
+		    Path legacySlotDir = legacySavesDirectory.resolve(slotId);
+		    Path canonicalSlotDir = savesDirectory.resolve(slotId);
+		    Path legacySave = legacySlotDir.resolve("save.json");
+		    Path legacyMetadata = legacySlotDir.resolve("metadata.json");
+		    if (!Files.exists(legacySave) && !Files.exists(legacyMetadata)) {
+			continue;
+		    }
+		    Files.createDirectories(canonicalSlotDir);
+		    Path canonicalSave = canonicalSlotDir.resolve("save.json");
+		    Path canonicalMetadata = canonicalSlotDir.resolve("metadata.json");
+		    if (Files.exists(legacySave) && !Files.exists(canonicalSave)) {
+			Files.move(legacySave, canonicalSave, StandardCopyOption.REPLACE_EXISTING);
+		    }
+		    if (Files.exists(legacyMetadata) && !Files.exists(canonicalMetadata)) {
+			Files.move(legacyMetadata, canonicalMetadata, StandardCopyOption.REPLACE_EXISTING);
+		    }
+		}
+	    } catch (IOException e) {
+		LOG.warn("Could not migrate legacy saves from {} to {}: {}", legacySavesDirectory, savesDirectory, e.getMessage());
+	    }
+	}
     }
 
     public List<SaveSlotSummary> listSaveSlots() {
@@ -389,6 +453,17 @@ public class SimulationService {
 	inventoryByAgent.forEach((key, value) -> save.inventoryByAgent.put(key, new ArrayList<>(value)));
 	actionHistoryByPlayer.forEach((key, value) -> save.actionHistoryByPlayer.put(key, value.stream().map(this::copyActionRequest).collect(Collectors.toList())));
 	save.pendingPlayerActions.addAll(actionQueue.stream().map(this::copyActionRequest).collect(Collectors.toList()));
+	runtimeStateByAgent.forEach((key, value) -> save.runtimeStateByAgent.put(key, toSavedRuntimeAgentState(value)));
+	reactiveEventsByAgent.forEach((key, value) -> save.reactiveEventsByAgent.put(key, value.stream().map(this::toSavedReactiveEvent).collect(Collectors.toList())));
+	committedActionsByAgent.forEach((key, value) -> save.committedActionsByAgent.put(key, value.stream().map(this::toSavedCommittedAction).collect(Collectors.toList())));
+	agenticStateByAgent.forEach((key, value) -> save.agenticStateByAgent.put(key, toSavedAgenticRuntimeState(value)));
+	socialEpisodesByAgent.forEach((agentName, byTarget) -> {
+	    Map<String, List<SaveGame.SavedSocialEpisode>> savedByTarget = new LinkedHashMap<>();
+	    byTarget.forEach((targetId, episodes) -> savedByTarget.put(targetId, episodes.stream().map(this::toSavedSocialEpisode).collect(Collectors.toList())));
+	    save.socialEpisodesByAgent.put(agentName, savedByTarget);
+	});
+	conversationTurnsByPair.forEach((pairKey, turns) -> save.conversationTurnsByPair.put(pairKey, turns.stream().map(this::toSavedConversationTurn).collect(Collectors.toList())));
+	save.chronicle.addAll(chronicle);
 	return save;
     }
 
@@ -433,6 +508,37 @@ public class SimulationService {
 	}
 	if (save.pendingPlayerActions != null) {
 	    actionQueue.addAll(save.pendingPlayerActions.stream().map(this::copyActionRequest).collect(Collectors.toList()));
+	}
+	if (save.runtimeStateByAgent != null) {
+	    save.runtimeStateByAgent.forEach((key, value) -> runtimeStateByAgent.put(key, fromSavedRuntimeAgentState(value)));
+	}
+	if (save.reactiveEventsByAgent != null) {
+	    save.reactiveEventsByAgent.forEach((key, value) -> reactiveEventsByAgent.put(key,
+		value.stream().map(this::fromSavedReactiveEvent).collect(Collectors.toCollection(ArrayDeque::new))));
+	}
+	if (save.committedActionsByAgent != null) {
+	    save.committedActionsByAgent.forEach((key, value) -> committedActionsByAgent.put(key,
+		value.stream().map(this::fromSavedCommittedAction).collect(Collectors.toCollection(ArrayDeque::new))));
+	}
+	if (save.agenticStateByAgent != null) {
+	    save.agenticStateByAgent.forEach((key, value) -> agenticStateByAgent.put(key, fromSavedAgenticRuntimeState(value)));
+	}
+	if (save.socialEpisodesByAgent != null) {
+	    save.socialEpisodesByAgent.forEach((agentName, byTarget) -> {
+		Map<String, Deque<SocialEpisode>> restoredByTarget = new ConcurrentHashMap<>();
+		if (byTarget != null) {
+		    byTarget.forEach((targetId, episodes) -> restoredByTarget.put(targetId,
+			episodes.stream().map(this::fromSavedSocialEpisode).collect(Collectors.toCollection(ArrayDeque::new))));
+		}
+		socialEpisodesByAgent.put(agentName, restoredByTarget);
+	    });
+	}
+	if (save.conversationTurnsByPair != null) {
+	    save.conversationTurnsByPair.forEach((pairKey, turns) -> conversationTurnsByPair.put(pairKey,
+		turns.stream().map(this::fromSavedConversationTurn).collect(Collectors.toCollection(ArrayDeque::new))));
+	}
+	if (save.chronicle != null) {
+	    chronicle.addAll(save.chronicle);
 	}
 	for (Agent agent : world.getAgents()) {
 	    inventoryByAgent.putIfAbsent(agent.getFullName(), new LinkedHashSet<>());
@@ -492,6 +598,7 @@ public class SimulationService {
 	saved.name = agent.getFullName();
 	saved.player = agent instanceof Player;
 	saved.activity = agent.getCurrentActivity();
+	saved.lastActivity = agent.getLastActivity();
 	saved.emoji = agent.getEmoji();
 	saved.location = agent.getLocation() == null ? null : agent.getLocation().getFullPath();
 	saved.targetLocation = agent.getTargetLocation();
@@ -501,11 +608,15 @@ public class SimulationService {
 	saved.hasBeenOrchestrated = agent.hasBeenOrchestrated();
 	saved.deferScriptedActivityPresentation = agent.isDeferScriptedActivityPresentation();
 	saved.stressLevel = agent.getStressLevel();
+	saved.mentalState = agent.getMentalState();
 	saved.carriedItemNames = new ArrayList<>(agent.getCarriedItemNames());
 	saved.typedInventory = new LinkedHashMap<>(agent.getInventory());
-	saved.pendingActions = agent.getPendingActions();
+	saved.activeAction = agent.getActiveAction();
+	saved.queuedActions = new ArrayList<>(agent.getQueuedActions());
+	saved.epistemicMemory = agent.getEpistemicMemory().snapshot();
 	if (agent instanceof Player player) {
 	    saved.playerStress = player.getStress();
+	    saved.playerNumInteractions = player.getNumInteractions();
 	}
 	for (Memory memory : agent.getMemoryStream().getMemories()) {
 	    saved.memories.add(toSavedMemory(memory));
@@ -523,12 +634,11 @@ public class SimulationService {
 	    ? new Player(saved.name, characteristics, saved.activity, location)
 	    : new Agent(saved.name, characteristics, saved.activity, location);
 	agent.setPosition(saved.x, saved.y);
-	agent.setCurrentEmoji(saved.emoji);
-	agent.setTargetLocation(saved.targetLocation);
 	agent.setTraits(saved.traits);
 	agent.setHasBeenOrchestrated(saved.hasBeenOrchestrated);
 	agent.setDeferScriptedActivityPresentation(saved.deferScriptedActivityPresentation);
-	agent.applyStressChange(saved.stressLevel - agent.getStressLevel());
+	agent.restoreActionHistory(saved.activity, saved.lastActivity, saved.emoji, saved.stressLevel, saved.mentalState);
+	agent.setTargetLocation(saved.targetLocation);
 	agent.setCarriedItemNames(saved.carriedItemNames);
 	agent.getInventory().clear();
 	if (saved.typedInventory != null) {
@@ -539,11 +649,11 @@ public class SimulationService {
 	    .map(this::fromSavedMemory)
 	    .collect(Collectors.toList());
 	agent.getMemoryStream().addAll(restoredMemories);
-	if (saved.pendingActions != null) {
-	    agent.replaceActionQueue(saved.pendingActions);
-	}
+	agent.restoreActionQueue(saved.activeAction, saved.queuedActions);
+	agent.getEpistemicMemory().restore(saved.epistemicMemory);
 	if (agent instanceof Player player) {
 	    player.setStress(saved.playerStress);
+	    player.setNumInteractions(saved.playerNumInteractions);
 	}
 	return agent;
     }
@@ -554,6 +664,17 @@ public class SimulationService {
 	saved.importance = (int) memory.getImportance();
 	if (memory instanceof Characteristic) {
 	    saved.type = "characteristic";
+	} else if (memory instanceof Commitment commitment) {
+	    saved.type = "commitment";
+	    saved.time = commitment.getTime();
+	    saved.planType = commitment.getType().name();
+	    saved.endTime = commitment.getEndTime();
+	    saved.commitmentLocation = commitment.getLocation();
+	    saved.commitmentPriority = commitment.getPriority();
+	    saved.commitmentStatus = commitment.getStatus().name();
+	    saved.commitmentGoal = commitment.getGoal();
+	} else if (memory instanceof Reflection) {
+	    saved.type = "reflection";
 	} else if (memory instanceof Plan plan) {
 	    saved.type = "plan";
 	    saved.time = plan.getTime();
@@ -572,9 +693,34 @@ public class SimulationService {
     }
 
     private Memory fromSavedMemory(SaveGame.SavedMemory saved) {
+	if ("characteristic".equals(saved.type)) {
+	    Characteristic characteristic = new Characteristic(saved.description);
+	    characteristic.setImportance(saved.importance);
+	    return characteristic;
+	}
+	if ("reflection".equals(saved.type)) {
+	    Reflection reflection = new Reflection(saved.description);
+	    reflection.setImportance(saved.importance);
+	    return reflection;
+	}
+	if ("commitment".equals(saved.type)) {
+	    Commitment commitment = new Commitment(
+		saved.commitmentGoal == null ? saved.description : saved.commitmentGoal,
+		saved.commitmentLocation,
+		saved.time == null ? SimulationTime.now() : saved.time,
+		saved.endTime == null ? (saved.time == null ? SimulationTime.now() : saved.time) : saved.endTime,
+		saved.commitmentPriority <= 0 ? 5 : saved.commitmentPriority);
+	    commitment.setImportance(saved.importance);
+	    if (saved.commitmentStatus != null && !saved.commitmentStatus.isBlank()) {
+		commitment.setStatus(CommitmentStatus.valueOf(saved.commitmentStatus));
+	    }
+	    return commitment;
+	}
 	if ("plan".equals(saved.type)) {
 	    PlanType type = saved.planType == null ? PlanType.LONG_TERM : PlanType.valueOf(saved.planType);
-	    return new Plan(saved.description, saved.time == null ? SimulationTime.now() : saved.time, type);
+	    Plan plan = new Plan(saved.description, saved.time == null ? SimulationTime.now() : saved.time, type);
+	    plan.setImportance(saved.importance);
+	    return plan;
 	}
 	Observation observation = new Observation(saved.description, saved.time == null ? SimulationTime.now() : saved.time, saved.importance);
 	observation.setReactable(saved.reactable);
@@ -599,6 +745,224 @@ public class SimulationService {
 	    .map(item -> new Dialog(item.name, item.message))
 	    .collect(Collectors.toList());
 	return new Conversation(saved.talker, saved.talkee, dialog);
+    }
+
+    private SaveGame.SavedRuntimeAgentState toSavedRuntimeAgentState(RuntimeAgentState state) {
+	SaveGame.SavedRuntimeAgentState saved = new SaveGame.SavedRuntimeAgentState();
+	saved.lastRoutineDate = state.lastRoutineDate;
+	saved.lastReflectionDate = state.lastReflectionDate;
+	saved.lastLlmCallAt = state.lastLlmCallAt;
+	saved.lastOrchestratedAt = state.lastOrchestratedAt;
+	saved.lastAware = state.lastAware;
+	saved.lastTraceActivity = state.lastTraceActivity;
+	saved.lastTraceLocation = state.lastTraceLocation;
+	saved.lastTraceTarget = state.lastTraceTarget;
+	saved.lastTraceX = state.lastTraceX;
+	saved.lastTraceY = state.lastTraceY;
+	saved.lastTraceLoggedAt = state.lastTraceLoggedAt;
+	return saved;
+    }
+
+    private RuntimeAgentState fromSavedRuntimeAgentState(SaveGame.SavedRuntimeAgentState saved) {
+	RuntimeAgentState state = new RuntimeAgentState();
+	state.lastRoutineDate = saved.lastRoutineDate;
+	state.lastReflectionDate = saved.lastReflectionDate;
+	state.lastLlmCallAt = saved.lastLlmCallAt;
+	state.lastOrchestratedAt = saved.lastOrchestratedAt;
+	state.lastAware = saved.lastAware;
+	state.lastTraceActivity = saved.lastTraceActivity;
+	state.lastTraceLocation = saved.lastTraceLocation;
+	state.lastTraceTarget = saved.lastTraceTarget;
+	state.lastTraceX = saved.lastTraceX;
+	state.lastTraceY = saved.lastTraceY;
+	state.lastTraceLoggedAt = saved.lastTraceLoggedAt;
+	return state;
+    }
+
+    private SaveGame.SavedReactiveEvent toSavedReactiveEvent(ReactiveEvent event) {
+	SaveGame.SavedReactiveEvent saved = new SaveGame.SavedReactiveEvent();
+	saved.description = event.description;
+	saved.severity = event.severity;
+	saved.createdAt = event.createdAt;
+	saved.playerInvolved = event.playerInvolved;
+	return saved;
+    }
+
+    private ReactiveEvent fromSavedReactiveEvent(SaveGame.SavedReactiveEvent saved) {
+	ReactiveEvent event = new ReactiveEvent();
+	event.description = saved.description;
+	event.severity = saved.severity;
+	event.createdAt = saved.createdAt;
+	event.playerInvolved = saved.playerInvolved;
+	return event;
+    }
+
+    private SaveGame.SavedCommittedAction toSavedCommittedAction(CommittedAction action) {
+	SaveGame.SavedCommittedAction saved = new SaveGame.SavedCommittedAction();
+	saved.action = action.action;
+	saved.reason = action.reason;
+	saved.location = action.location;
+	saved.x = action.x;
+	saved.y = action.y;
+	saved.createdAt = action.createdAt;
+	return saved;
+    }
+
+    private CommittedAction fromSavedCommittedAction(SaveGame.SavedCommittedAction saved) {
+	CommittedAction action = new CommittedAction();
+	action.action = saved.action;
+	action.reason = saved.reason;
+	action.location = saved.location;
+	action.x = saved.x;
+	action.y = saved.y;
+	action.createdAt = saved.createdAt;
+	return action;
+    }
+
+    private SaveGame.SavedKnowledgeEntry toSavedKnowledgeEntry(KnowledgeEntry entry) {
+	SaveGame.SavedKnowledgeEntry saved = new SaveGame.SavedKnowledgeEntry();
+	saved.values = new ArrayList<>(entry.values);
+	saved.confidence = entry.confidence;
+	saved.updatedAt = entry.updatedAt;
+	saved.source = entry.source;
+	return saved;
+    }
+
+    private KnowledgeEntry fromSavedKnowledgeEntry(SaveGame.SavedKnowledgeEntry saved) {
+	KnowledgeEntry entry = new KnowledgeEntry();
+	entry.values = saved.values == null ? new ArrayList<>() : new ArrayList<>(saved.values);
+	entry.confidence = saved.confidence;
+	entry.updatedAt = saved.updatedAt;
+	entry.source = saved.source;
+	return entry;
+    }
+
+    private SaveGame.SavedAgenticGoal toSavedAgenticGoal(AgenticGoal goal) {
+	if (goal == null) {
+	    return null;
+	}
+	SaveGame.SavedAgenticGoal saved = new SaveGame.SavedAgenticGoal();
+	saved.type = goal.type;
+	saved.targetId = goal.targetId;
+	saved.targetType = goal.targetType;
+	saved.targetIsMobile = goal.targetIsMobile;
+	saved.snapshotX = goal.snapshotX;
+	saved.snapshotY = goal.snapshotY;
+	saved.snapshotLocation = goal.snapshotLocation;
+	saved.topic = goal.topic;
+	saved.opener = goal.opener;
+	saved.description = goal.description;
+	saved.priority = goal.priority;
+	saved.actionType = goal.actionType;
+	saved.actionDescription = goal.actionDescription;
+	saved.actionFlair = goal.actionFlair;
+	return saved;
+    }
+
+    private AgenticGoal fromSavedAgenticGoal(SaveGame.SavedAgenticGoal saved) {
+	if (saved == null) {
+	    return null;
+	}
+	AgenticGoal goal = new AgenticGoal();
+	goal.type = saved.type;
+	goal.targetId = saved.targetId;
+	goal.targetType = saved.targetType;
+	goal.targetIsMobile = saved.targetIsMobile;
+	goal.snapshotX = saved.snapshotX;
+	goal.snapshotY = saved.snapshotY;
+	goal.snapshotLocation = saved.snapshotLocation;
+	goal.topic = saved.topic;
+	goal.opener = saved.opener;
+	goal.description = saved.description;
+	goal.priority = saved.priority;
+	goal.actionType = saved.actionType;
+	goal.actionDescription = saved.actionDescription;
+	goal.actionFlair = saved.actionFlair;
+	return goal;
+    }
+
+    private SaveGame.SavedAgenticRuntimeState toSavedAgenticRuntimeState(AgenticRuntimeState state) {
+	SaveGame.SavedAgenticRuntimeState saved = new SaveGame.SavedAgenticRuntimeState();
+	saved.phase = state.phase == null ? null : state.phase.name();
+	saved.activeGoal = toSavedAgenticGoal(state.activeGoal);
+	saved.phaseUpdatedAt = state.phaseUpdatedAt;
+	saved.cooldownUntil = state.cooldownUntil;
+	state.knowledge.forEach((key, value) -> saved.knowledge.put(key, toSavedKnowledgeEntry(value)));
+	saved.chatWindowClosedObserved = state.chatWindowClosedObserved;
+	saved.pinnedLastTurn = state.pinnedLastTurn;
+	saved.deferredTurns = state.deferredTurns;
+	saved.recentIgnoreCount = state.recentIgnoreCount;
+	saved.socialFriction = state.socialFriction;
+	saved.lastInitiativeScore = state.lastInitiativeScore;
+	saved.lastOutcome = state.lastOutcome;
+	saved.lastInitiatedAt = state.lastInitiatedAt;
+	saved.lastRepliedAt = state.lastRepliedAt;
+	saved.lastError = state.lastError;
+	return saved;
+    }
+
+    private AgenticRuntimeState fromSavedAgenticRuntimeState(SaveGame.SavedAgenticRuntimeState saved) {
+	AgenticRuntimeState state = new AgenticRuntimeState();
+	if (saved.phase != null && !saved.phase.isBlank()) {
+	    state.phase = AgenticPhase.valueOf(saved.phase);
+	}
+	state.activeGoal = fromSavedAgenticGoal(saved.activeGoal);
+	state.phaseUpdatedAt = saved.phaseUpdatedAt;
+	state.cooldownUntil = saved.cooldownUntil;
+	if (saved.knowledge != null) {
+	    saved.knowledge.forEach((key, value) -> state.knowledge.put(key, fromSavedKnowledgeEntry(value)));
+	}
+	state.chatWindowClosedObserved = saved.chatWindowClosedObserved;
+	state.pinnedLastTurn = saved.pinnedLastTurn;
+	state.deferredTurns = saved.deferredTurns;
+	state.recentIgnoreCount = saved.recentIgnoreCount;
+	state.socialFriction = saved.socialFriction;
+	state.lastInitiativeScore = saved.lastInitiativeScore;
+	state.lastOutcome = saved.lastOutcome;
+	state.lastInitiatedAt = saved.lastInitiatedAt;
+	state.lastRepliedAt = saved.lastRepliedAt;
+	state.lastError = saved.lastError;
+	return state;
+    }
+
+    private SaveGame.SavedSocialEpisode toSavedSocialEpisode(SocialEpisode episode) {
+	SaveGame.SavedSocialEpisode saved = new SaveGame.SavedSocialEpisode();
+	saved.target = episode.target;
+	saved.outcome = episode.outcome;
+	saved.topic = episode.topic;
+	saved.playerReply = episode.playerReply;
+	saved.summary = episode.summary;
+	saved.createdAt = episode.createdAt;
+	return saved;
+    }
+
+    private SocialEpisode fromSavedSocialEpisode(SaveGame.SavedSocialEpisode saved) {
+	SocialEpisode episode = new SocialEpisode();
+	episode.target = saved.target;
+	episode.outcome = saved.outcome;
+	episode.topic = saved.topic;
+	episode.playerReply = saved.playerReply;
+	episode.summary = saved.summary;
+	episode.createdAt = saved.createdAt;
+	return episode;
+    }
+
+    private SaveGame.SavedConversationTurn toSavedConversationTurn(ConversationTurn turn) {
+	SaveGame.SavedConversationTurn saved = new SaveGame.SavedConversationTurn();
+	saved.speaker = turn.speaker;
+	saved.listener = turn.listener;
+	saved.text = turn.text;
+	saved.createdAt = turn.createdAt;
+	return saved;
+    }
+
+    private ConversationTurn fromSavedConversationTurn(SaveGame.SavedConversationTurn saved) {
+	ConversationTurn turn = new ConversationTurn();
+	turn.speaker = saved.speaker;
+	turn.listener = saved.listener;
+	turn.text = saved.text;
+	turn.createdAt = saved.createdAt;
+	return turn;
     }
 
     private SaveSlotSummary readSlotSummary(String slotId) {
