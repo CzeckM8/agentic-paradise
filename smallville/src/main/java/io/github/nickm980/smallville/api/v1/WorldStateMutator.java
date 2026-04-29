@@ -49,17 +49,19 @@ public class WorldStateMutator {
                         WorldAction.TargetType targetType, String payload, int turnNumber) {
         if (verb == null || agent == null) return null;
         switch (verb.toLowerCase()) {
-            case "carry":       return applyCarry(agent, targetId);
-            case "give":        return applyGive(agent, targetId, payload, turnNumber);
-            case "open":        return applyOpen(targetId, false);
-            case "close":       return applyClose(targetId);
-            case "unlock":      return applyUnlock(targetId);
-            case "lock":        return applyLock(targetId);
-            case "write":       return applyWrite(targetId, payload);
-            case "speak":       return applySpeak(agent, targetId, payload, turnNumber);
-            case "place_object": return applyPlaceObject(agent, payload);
+            case "carry":        return applyCarry(agent, targetId);
+            case "give":         return applyGive(agent, targetId, payload, turnNumber);
+            case "open":         return applyOpen(targetId, false);
+            case "close":        return applyClose(targetId);
+            case "unlock":       return applyUnlock(targetId);
+            case "lock":         return applyLock(targetId);
+            case "write":        return applyWrite(targetId, payload);
+            case "speak":        return applySpeak(agent, targetId, payload, turnNumber);
+            case "place_object": return applyPlaceObject(agent, targetId, payload);
+            case "use":          return applyUse(agent, targetId, turnNumber);
+            // Combat: damage applied by applyTurnResult with apply-time range validation
             case "punch": case "kick": case "tackle": case "attack":
-                return applyCombat(agent, verb, targetId);
+                return null;
             // Observation/inspection verbs leave no physical trace
             case "observe": case "inspect": case "sit": case "wait":
                 return null;
@@ -83,9 +85,11 @@ public class WorldStateMutator {
         obj.setLocation(null);
         obj.setX(agent.getX());
         obj.setY(agent.getY());
-        // Add to typed inventory if not already held
+        // Add to typed inventory if not already held.
+        // item.id must equal objectId so objectInstances.get(item.getId()) resolves correctly.
         if (!agent.getInventory().containsKey(objectId)) {
             InventoryItem item = new InventoryItem(objectId, obj.getName());
+            item.setId(objectId);
             agent.addInventoryItem(item);
         }
         refreshCarriedItems(agent);
@@ -242,7 +246,7 @@ public class WorldStateMutator {
         return applySpeakImpl(agent, targetId, text, turnNumber);
     }
 
-    private String applyPlaceObject(Agent agent, String itemId) {
+    private String applyPlaceObject(Agent agent, String surfaceId, String itemId) {
         Map<String, InventoryItem> inv = agent.getInventory();
         if (inv.isEmpty()) {
             LOG.warn("[WorldStateMutator] place_object: {} has nothing to place", agent.getFullName());
@@ -260,9 +264,21 @@ public class WorldStateMutator {
             return null;
         }
 
-        double placeX = snapToTile(agent.getX());
-        double placeY = snapToTile(agent.getY());
-        String placeLocation = agent.getLocation() != null ? agent.getLocation().getFullPath() : null;
+        // Anchor to surface position if surface target is valid
+        WorldObjectInstance surface = surfaceId != null ? objectInstances.get(surfaceId) : null;
+        double placeX = surface != null ? snapToTile(surface.getX()) : snapToTile(agent.getX());
+        double placeY = surface != null ? snapToTile(surface.getY()) : snapToTile(agent.getY());
+        String placeLocation = surface != null ? surface.getLocation()
+            : (agent.getLocation() != null ? agent.getLocation().getFullPath() : null);
+
+        // If placing on the trash receptacle, remove the item from the world entirely
+        if (surface != null && isTrashReceptacle(surface)) {
+            objectInstances.remove(objectId);
+            agent.removeInventoryItem(objectId);
+            refreshCarriedItems(agent);
+            LOG.info("[WorldStateMutator] {} disposed of '{}' in trash bin", agent.getFullName(), obj.getName());
+            return "disposed of " + obj.getName() + " in the trash";
+        }
 
         obj.setX(placeX);
         obj.setY(placeY);
@@ -278,27 +294,111 @@ public class WorldStateMutator {
         return "placed " + obj.getName();
     }
 
-    private String applyCombat(Agent agent, String verb, String targetId) {
-        Agent target = world.getAgent(targetId).orElse(null);
-        if (target == null) {
-            LOG.warn("[WorldStateMutator] combat: target '{}' not found for {}", targetId, agent.getFullName());
+    private boolean isTrashReceptacle(WorldObjectInstance obj) {
+        if (obj == null || obj.getProperties() == null) return false;
+        return Boolean.TRUE.equals(obj.getProperties().get("is_trash_receptacle"));
+    }
+
+    /**
+     * Use a consumable item (food/drink → heal HP and leave trash) or
+     * interact with a production machine (coffee machine → brew coffee into inventory).
+     */
+    private String applyUse(Agent agent, String targetId, int turnNumber) {
+        WorldObjectInstance obj = objectInstances.get(targetId);
+        if (obj == null) {
+            // Try resolving by display name from inventory
+            for (InventoryItem item : agent.getInventory().values()) {
+                if (item.getId().equals(targetId) ||
+                        (item.getDisplayName() != null && item.getDisplayName().equalsIgnoreCase(targetId))) {
+                    obj = objectInstances.get(item.getId());
+                    if (obj != null) break;
+                }
+            }
+        }
+        if (obj == null) {
+            LOG.warn("[WorldStateMutator] use: object '{}' not found for {}", targetId, agent.getFullName());
             return null;
         }
-        int base = switch (verb.toLowerCase()) {
-            case "kick"   -> 12;
-            case "tackle" -> 6;
-            default       -> 8; // punch / attack
-        };
-        int damage = Math.max(1, base + (int)(Math.random() * 5));
-        target.applyDamage(damage);
-        target.applyStressChange(0.12);
-        agent.applyStressChange(0.03);
-        Observation hit = new Observation(agent.getFullName() + " " + verb + "ed you for " + damage + " damage!");
-        hit.setImportance(9);
-        target.getMemoryStream().add(hit);
-        LOG.info("[WorldStateMutator] {} {}ed {} for {} damage (target hp={})",
-            agent.getFullName(), verb, targetId, damage, target.getHealth());
-        return verb + "ed " + targetId + " for " + damage + " damage";
+
+        Map<String, Object> props = obj.getProperties() != null ? obj.getProperties() : new HashMap<>();
+
+        // Production machine (e.g. coffee machine) → create item in inventory
+        if (Boolean.TRUE.equals(props.get("usable")) && props.containsKey("produces_item")) {
+            return applyUseMachine(agent, obj, turnNumber);
+        }
+
+        // Consumable item → heal HP, convert to trash
+        if (Boolean.TRUE.equals(props.get("consumable"))) {
+            return applyUseConsumable(agent, obj);
+        }
+
+        LOG.warn("[WorldStateMutator] use: '{}' is neither usable nor consumable", obj.getName());
+        return null;
+    }
+
+    private String applyUseMachine(Agent agent, WorldObjectInstance machine, int turnNumber) {
+        Map<String, Object> props = machine.getProperties();
+        String produces = String.valueOf(props.getOrDefault("produces_item", "coffee"));
+        int healAmount = props.get("produces_heal_amount") instanceof Number
+            ? ((Number) props.get("produces_heal_amount")).intValue() : 30;
+
+        String cupId = "item_" + produces + "_" + Math.abs((agent.getFullName() + turnNumber).hashCode() % 100000);
+        WorldObjectInstance cup = new WorldObjectInstance(cupId, "consumable",
+            produces.equals("coffee") ? "Coffee" : produces,
+            agent.getX(), agent.getY(),
+            agent.getLocation() != null ? agent.getLocation().getFullPath() : null);
+
+        Map<String, Object> cupProps = new HashMap<>();
+        cupProps.put("carriable", true);
+        cupProps.put("consumable", true);
+        cupProps.put("heal_amount", healAmount);
+        cupProps.put("heldBy", agent.getFullName());
+        cupProps.put("description", "A freshly brewed coffee.");
+        cup.setProperties(cupProps);
+        cup.setHeldBy(agent.getFullName());
+        objectInstances.put(cupId, cup);
+
+        // item.id must equal cupId so objectInstances.get(item.getId()) resolves correctly.
+        InventoryItem item = new InventoryItem(cupId, cup.getName());
+        item.setId(cupId);
+        agent.addInventoryItem(item);
+        refreshCarriedItems(agent);
+
+        LOG.info("[WorldStateMutator] {} brewed {} ({})", agent.getFullName(), cup.getName(), cupId);
+        return "used " + machine.getName() + " and received a " + cup.getName();
+    }
+
+    private String applyUseConsumable(Agent agent, WorldObjectInstance obj) {
+        Map<String, Object> props = obj.getProperties() != null ? obj.getProperties() : new HashMap<>();
+        int healAmount = props.get("heal_amount") instanceof Number
+            ? ((Number) props.get("heal_amount")).intValue() : 20;
+        String itemName = obj.getName();
+
+        agent.recoverHealth(healAmount);
+        agent.applyStressChange(-0.1); // eating is calming
+
+        // Remove from typed inventory
+        agent.removeInventoryItem(obj.getInstanceId());
+
+        // Convert object to trash in place (don't remove from world)
+        obj.setTypeId("trash_item");
+        obj.setName(itemName + " wrapper");
+        if (obj.getProperties() == null) obj.setProperties(new HashMap<>());
+        obj.getProperties().put("consumable", false);
+        obj.getProperties().put("is_trash", true);
+        obj.getProperties().put("carriable", true);
+        obj.getProperties().remove("heal_amount");
+        obj.getProperties().remove("heldBy");
+        obj.setHeldBy(null);
+        obj.setX(snapToTile(agent.getX()));
+        obj.setY(snapToTile(agent.getY()));
+        obj.setLocation(agent.getLocation() != null ? agent.getLocation().getFullPath() : null);
+
+        refreshCarriedItems(agent);
+
+        LOG.info("[WorldStateMutator] {} consumed '{}' (+{} HP, health={})",
+            agent.getFullName(), itemName, healAmount, agent.getHealth());
+        return "consumed " + itemName + " and recovered " + healAmount + " HP";
     }
 
     // ── Inventory helpers ─────────────────────────────────────────────────────

@@ -234,6 +234,27 @@ public class AgentToolExecutor {
             return CommitValidationResult.rejected("unknown target_type: " + targetType + ". Use 'agent', 'player', or 'object'");
         }
 
+        // Range enforcement for combat verbs (mirrors player combat checks)
+        if (wtt == WorldAction.TargetType.AGENT || wtt == WorldAction.TargetType.PLAYER) {
+            Agent combatTarget = world.getAgent(targetId).orElse(null);
+            if (combatTarget != null) {
+                String verbLower = verb.toLowerCase();
+                int dist = tileManhattanDistance(agent.getX(), agent.getY(), combatTarget.getX(), combatTarget.getY());
+                if ("punch".equals(verbLower) || "kick".equals(verbLower)) {
+                    if (dist > 2) {
+                        return CommitValidationResult.rejected(verb + " requires being adjacent (≤2 tiles). Current distance: " + dist + " tiles.");
+                    }
+                } else if ("tackle".equals(verbLower)) {
+                    if (dist < 2) {
+                        return CommitValidationResult.rejected("Cannot tackle when already adjacent — use punch or kick instead.");
+                    }
+                    if (dist > 3) {
+                        return CommitValidationResult.rejected("Too far to tackle (" + dist + " tiles) — move within 3 tiles.");
+                    }
+                }
+            }
+        }
+
         // ActionResolver is actor-type-blind; fromPlayerAction is safe here
         WorldAction action = WorldAction.fromPlayerAction(
             agent.getFullName(), verb, targetId, wtt, null, payload,
@@ -272,6 +293,12 @@ public class AgentToolExecutor {
         double dx = x1 - x2;
         double dy = y1 - y2;
         return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    private int tileManhattanDistance(double ax, double ay, double bx, double by) {
+        int dx = Math.abs((int) Math.floor(ax / TILE_SIZE) - (int) Math.floor(bx / TILE_SIZE));
+        int dy = Math.abs((int) Math.floor(ay / TILE_SIZE) - (int) Math.floor(by / TILE_SIZE));
+        return dx + dy;
     }
 
     // ── Result container for commit validation ────────────────────────────────

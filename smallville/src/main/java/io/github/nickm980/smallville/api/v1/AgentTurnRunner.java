@@ -176,12 +176,14 @@ public class AgentTurnRunner {
             String targetId = args.path("target_id").asText("");
             String targetType = args.path("target_type").asText("");
             String payload = args.has("payload") ? args.get("payload").asText(null) : null;
+            String speech = args.has("speech") ? args.get("speech").asText(null) : null;
+            if (speech != null && speech.isBlank()) speech = null;
 
             AgentToolExecutor.CommitValidationResult validation =
                 executor.executeCommitValidation(ctx.agent, verb, targetId, targetType, payload, ctx.turnNumber);
 
             if (validation.permitted) {
-                return TurnResult.committed(verb, targetId, targetType, payload, new ArrayList<>(allCalls));
+                return TurnResult.committed(verb, targetId, targetType, payload, speech, new ArrayList<>(allCalls));
             } else {
                 // Write a belief correction so the agent learns from this rejection
                 ctx.agent.getEpistemicMemory().ingestBeliefCorrection(
@@ -250,11 +252,12 @@ public class AgentTurnRunner {
 
         sb.append("Use the available tools to reason about your situation, then call commit_action to act.\n");
         sb.append("Rules for commit_action:\n");
-        sb.append("  - verb must be one of: carry, place_object, write, open, close, unlock, lock, speak, punch, kick, tackle, attack, give, wait, observe\n");
+        sb.append("  - verb must be one of: carry, place_object, write, open, close, unlock, lock, use, speak, punch, kick, tackle, attack, give, wait, observe\n");
         sb.append("  - For combat: use punch (close range), kick (close range, more damage), tackle (2+ tiles away), or attack (generic)\n");
         sb.append("  - target_id must match an exact entity id from the Nearby list or your inventory (never a blank string)\n");
         sb.append("  - target_type must be 'agent', 'player', or 'object' matching the entity\n");
         sb.append("  - To do nothing this turn: verb=wait, target_id=self, target_type=agent\n");
+        sb.append("  - speech (optional, free action): only include if you are genuinely saying words OUT LOUD to a nearby person, e.g. speech=\"Stay back!\" while punching. Do NOT use to describe your own activity — leave it blank if you are just doing something silently.\n");
         sb.append("You must call commit_action exactly once — it ends your turn.");
 
         return sb.toString();
