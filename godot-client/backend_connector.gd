@@ -114,6 +114,13 @@ var property_action_rules: Dictionary = {
 	"carriable": [
 		{"actionKey": "carry", "label": "Carry", "actionType": "interact", "description": "Carrying"}
 	],
+	"consumable": [
+		{"actionKey": "use", "label": "Eat / Drink", "actionType": "use", "description": "Consuming",
+		 "requiresInventory": false}
+	],
+	"usable": [
+		{"actionKey": "use", "label": "Use", "actionType": "use", "description": "Using"}
+	],
 	# held_by_player is set client-side when deriving properties for inventory items on the ground
 	"held_by_player": [
 		{"actionKey": "drop", "label": "Drop", "actionType": "interact", "description": "Dropping"}
@@ -886,6 +893,34 @@ func _get_default_object_type_definitions() -> Dictionary:
 			"interactionMode": "adjacent",
 			"interactionRadius": 32,
 			"tags": ["pocket_size", "carriable"]
+		},
+		# consumable food/drink items — can be carried and used to restore HP
+		"consumable": {
+			"anchor": false,
+			"portable": true,
+			"pocket_size": true,
+			"carriable": true,
+			"consumable": true,
+			"interactive": true,
+			"passable": true,
+			"height": "low",
+			"interactionMode": "adjacent",
+			"interactionRadius": 32,
+			"tags": ["food", "carriable", "consumable"]
+		},
+		# trash items left behind after consuming food/drink
+		"trash_item": {
+			"anchor": false,
+			"portable": true,
+			"pocket_size": true,
+			"carriable": true,
+			"interactive": true,
+			"passable": true,
+			"height": "low",
+			"is_trash": true,
+			"interactionMode": "adjacent",
+			"interactionRadius": 32,
+			"tags": ["trash", "carriable"]
 		}
 	}
 
@@ -906,7 +941,7 @@ func _get_default_world_objects() -> Array:
 
 		# Coffee shop
 		{"id":"coffee_entry_street","type":"entrance_anchor","name":"Coffee Shop Entrance","x":1300,"y":210,"location":"coffee_shop","properties":{"linkedHint":"street","building":"coffee_shop","transition_point":true,"locked":false,"passable":true}},
-		{"id":"coffee_machine","type":"work_spot","name":"Espresso Station","x":1680,"y":120,"location":"coffee_shop","properties":{"activity":["brew","calibrate","clean"],"passable":false,"height":"counter","flat_surface":true,"description":"A gleaming brass espresso machine, warm to the touch."}},
+		{"id":"coffee_machine","type":"work_spot","name":"Espresso Station","x":1680,"y":120,"location":"coffee_shop","properties":{"activity":["brew","calibrate","clean"],"passable":false,"height":"counter","flat_surface":true,"usable":true,"produces_item":"coffee","produces_heal_amount":30,"description":"A gleaming brass espresso machine, warm to the touch."}},
 		{"id":"coffee_register","type":"work_spot","name":"Register","x":1580,"y":140,"location":"coffee_shop","properties":{"activity":["charge","serve"],"passable":false,"height":"counter","flat_surface":true}},
 		{"id":"coffee_table","type":"fixture","name":"Window Table","x":1440,"y":290,"location":"coffee_shop","properties":{"sitAround":true,"passable":false,"height":"medium","flat_surface":true,"comfort":"comfortable","description":"A small round table by the window, with two chairs."}},
 		{"id":"coffee_bulletin","type":"decor","name":"Community Bulletin Board","x":1335,"y":95,"location":"coffee_shop","properties":{"writable":true,"noteBoard":true,"passable":true,"height":"tall","has_writing":"Lost cat — answers to Biscuit. Reward offered. Also: open mic night Friday."}},
@@ -929,7 +964,15 @@ func _get_default_world_objects() -> Array:
 		{"id":"item_coin_square","type":"decor","name":"Coin Purse","x":790,"y":870,"location":"town_square","properties":{"carriable":true,"passable":true,"height":"low","tags":["coins","currency","valuables"],"description":"A small leather coin purse, a few coins jingling inside."}},
 		{"id":"item_key_home","type":"decor","name":"House Key","x":240,"y":725,"location":"home","properties":{"carriable":true,"passable":true,"height":"low","tags":["key","unlock"],"opens":"home_entry_street","description":"A brass door key on a simple ring."}},
 
-		# ── Market extras ────────────────────────────────────────────────────────
+		# ── Market food items ─────────────────────────────────────────────────────
+		{"id":"food_apple_1","type":"consumable","name":"Apple","x":340,"y":290,"location":"market","properties":{"carriable":true,"consumable":true,"passable":true,"height":"low","heal_amount":20,"description":"A crisp red apple from the morning's delivery."}},
+		{"id":"food_apple_2","type":"consumable","name":"Apple","x":380,"y":290,"location":"market","properties":{"carriable":true,"consumable":true,"passable":true,"height":"low","heal_amount":20,"description":"A slightly bruised apple, still good to eat."}},
+		{"id":"food_sandwich_1","type":"consumable","name":"Sandwich","x":350,"y":200,"location":"market","properties":{"carriable":true,"consumable":true,"passable":true,"height":"low","heal_amount":35,"description":"A thick sandwich of bread, cheese, and pickled vegetables."}},
+		{"id":"food_sandwich_2","type":"consumable","name":"Sandwich","x":400,"y":200,"location":"market","properties":{"carriable":true,"consumable":true,"passable":true,"height":"low","heal_amount":35,"description":"A hearty sandwich wrapped in cloth."}},
+		{"id":"food_water_1","type":"consumable","name":"Water Bottle","x":300,"y":290,"location":"market","properties":{"carriable":true,"consumable":true,"passable":true,"height":"low","heal_amount":15,"description":"A clay bottle of fresh water."}},
+		{"id":"market_trash_bin","type":"fixture","name":"Rubbish Bin","x":160,"y":290,"location":"market","properties":{"passable":false,"height":"low","interactive":true,"is_trash_receptacle":true,"flat_surface":false,"description":"A wooden barrel repurposed as a rubbish bin."}},
+
+		# ── Market extras ─────────────────────────────────────────────────────────
 		{"id":"market_stall_b","type":"work_spot","name":"Dry Goods Stall","x":300,"y":200,"location":"market","properties":{"activity":["sell","buy","barter"],"passable":false,"height":"counter","flat_surface":true,"description":"A wooden stall piled with dried beans, grain sacks, and spices."}},
 		{"id":"market_table_a","type":"fixture","name":"Display Table","x":350,"y":300,"location":"market","properties":{"passable":false,"height":"medium","flat_surface":true,"description":"A rough-hewn table used to display today's produce."}},
 		{"id":"market_chair_a","type":"decor","name":"Stool","x":420,"y":350,"location":"market","properties":{"sittable":true,"passable":true,"height":"low","description":"A rickety three-legged stool behind the counter."}},
@@ -1706,6 +1749,18 @@ func _fetch_inventory_async(player_id: String) -> void:
 			name_label.tooltip_text = item_desc
 		row.add_child(name_label)
 
+		# Show "Use" button for consumable items
+		var is_consumable = false
+		if item_props is Dictionary:
+			is_consumable = _is_truthy(item_props.get("consumable", false))
+		if is_consumable:
+			var use_btn = Button.new()
+			use_btn.text = "Use"
+			use_btn.add_theme_font_size_override("font_size", 11)
+			use_btn.modulate = Color(0.4, 1.0, 0.5)
+			use_btn.pressed.connect(_on_inventory_use_pressed.bind(item_id, item_name))
+			row.add_child(use_btn)
+
 		var drop_btn = Button.new()
 		drop_btn.text = "Drop"
 		drop_btn.add_theme_font_size_override("font_size", 11)
@@ -1737,6 +1792,18 @@ func _on_inventory_drop_pressed(item_id: String, item_name: String) -> void:
 			break
 	_rebuild_blocked_tiles_cache()
 	_redraw_object_overlays()
+
+func _on_inventory_use_pressed(item_id: String, item_name: String) -> void:
+	close_context_action_panel()
+	if player_node == null:
+		return
+	object_interaction_in_last_turn = true
+	enqueue_player_action(
+		player_name, "use", "object:" + item_id,
+		player_node.current_location,
+		player_node.position.x, player_node.position.y,
+		"Using " + item_name, "", 0.2, "", "action:use"
+	)
 
 func open_context_action_panel_at(world_focus: Vector2) -> void:
 	if context_actions_request_in_flight:
@@ -2207,6 +2274,7 @@ func _build_groups_from_server_descriptors(descriptors: Array, player_position: 
 		if verb == "speak" or verb == "talk": action_type = "speak"
 		elif verb == "attack" or verb == "punch" or verb == "kick" or verb == "tackle": action_type = verb
 		elif verb == "throw": action_type = "throw"
+		elif verb == "use": action_type = "use"
 
 		var target_agent = ("object:" + target_id) if target_kind == "object" else target_id
 		var action_desc_text = "%s %s" % [verb, target_name]
@@ -2708,6 +2776,7 @@ const ACTION_CATEGORIES := {
 	"carry": "Items", "drop": "Items", "place_object": "Items",
 	"write": "Items", "study": "Items", "light": "Items",
 	"unlock": "Items", "lock": "Items",
+	"use": "Items",
 	"heal": "Items", "apply_herbs": "Items",
 	"cut": "Items", "carve": "Items", "bind": "Items",
 	"climb_rope": "Items", "unlock_pick": "Items",
@@ -3122,6 +3191,28 @@ func _on_context_action_selected(action: Dictionary) -> void:
 				context_action_title.text = obj_name
 			if context_action_status != null:
 				context_action_status.text = writing if writing != "" and writing.to_lower() != "null" else "(nothing written)"
+		return
+
+	# Use (consumable or production machine) → send directly to server as "use" action.
+	# action_key comes from flair (client-built actions); action_type comes from server descriptors.
+	if action_key == "use" or action_type == "use":
+		close_context_action_panel()
+		object_interaction_in_last_turn = true
+		# Production machines (usable=true) add a new item to inventory — auto-open
+		# the inventory panel afterward so the player sees the newly created item.
+		if target_kind == "object":
+			var target_obj = _get_world_object_by_id(target_id)
+			if target_obj is Dictionary:
+				var props = target_obj.get("properties", {})
+				if props is Dictionary and _is_truthy(props.get("usable", false)):
+					carry_action_in_last_turn = true
+		enqueue_player_action(
+			player_name, "use",
+			"object:" + target_id if target_kind == "object" else target_id,
+			player_node.current_location,
+			player_node.position.x, player_node.position.y,
+			action_description, "", 0.3, "", "action:use"
+		)
 		return
 
 	var target_world = Vector2.ZERO
@@ -3788,6 +3879,8 @@ func _on_state_received(result, response_code, headers, body, http):
 	_update_world(state)
 	if world_objects.is_empty():
 		_fetch_objects_async()
+	elif state.get("objects_changed", false):
+		_fetch_objects_async()
 
 	# Schedule next poll — drives the live display loop
 	get_tree().create_timer(POLL_INTERVAL_SEC).timeout.connect(_poll_backend, CONNECT_ONE_SHOT)
@@ -3938,7 +4031,10 @@ func _update_world(state):
 			var actor = str(npc_action.get("actor", "NPC"))
 			var narrative = str(npc_action.get("narrative", ""))
 			if narrative == "": continue
-			_append_action_log("[color=#ff6666]%s:[/color] %s" % [actor, narrative])
+			var ax = npc_action.get("ax", null)
+			var ay = npc_action.get("ay", null)
+			var coord = " (%d,%d)" % [int(ax), int(ay)] if ax != null and ay != null else ""
+			_append_action_log("[color=#ff9966]%s:[/color] %s%s" % [actor, narrative, coord])
 
 func _progress_simulation():
 	"""POST to /state to advance the simulation one step"""
@@ -4178,7 +4274,12 @@ func _on_turn_processed(result, response_code, headers, body, http):
 			var pipe_idx = log_entry.find(" | runtime=")
 			if pipe_idx >= 0:
 				log_entry = log_entry.substr(0, pipe_idx)
-			_append_action_log("[color=#ffdd88]You:[/color] " + log_entry)
+			# Skip movement results — they clutter the log
+			var is_move = log_entry.begins_with("Moved to") or log_entry.begins_with("Move")
+			if not is_move:
+				var px = int(player_node.position.x / tile_size) if player_node != null else 0
+				var py = int(player_node.position.y / tile_size) if player_node != null else 0
+				_append_action_log("[color=#ffdd88]You:[/color] %s (%d,%d)" % [log_entry, px, py])
 	else:
 		push_error("Turn processing failed with code: " + str(response_code))
 		if dialogue_status != null:
@@ -4935,16 +5036,15 @@ func _redraw_object_overlays():
 		var tile_center = tile_to_world_center(world_to_tile(tile_origin))
 		var properties = obj.get("properties", {})
 
-		# Walls always drawn. Carriable ground items within 12 tiles are fully visible so
-		# thrown/dropped loot can always be found nearby; distant carriable items still use LOS.
-		var is_carriable = properties.get("carriable", false) or properties.get("interactive", false)
-		var is_nearby_loot = is_carriable and tile_origin.distance_to(player_pos_for_los) <= 12 * tile_size
-		var in_los = object_type == "wall" or is_nearby_loot or has_line_of_sight(player_pos_for_los, tile_origin)
+		# Walls always drawn; all other objects require LOS.
+		var in_los = object_type == "wall" or has_line_of_sight(player_pos_for_los, tile_origin)
 
 		var color = _get_object_type_color(object_type)
 		var radius = _get_object_marker_radius(object_type)
 
-		var los_alpha = 1.0 if in_los else 0.15
+		if not in_los:
+			continue  # fully hidden — don't spawn node at all
+
 		var sprite_path = _get_object_sprite_path(obj)
 		var marker: Node2D
 		if sprite_path != "":
@@ -4960,14 +5060,10 @@ func _redraw_object_overlays():
 				marker = sprite_node
 		if marker == null:
 			marker = _make_object_marker(object_type, tile_center, radius, color)
-		marker.modulate.a = los_alpha
 		object_overlays.add_child(marker)
 
 		if object_type == "wall":
 			continue
-
-		if not in_los:
-			continue  # don't draw labels for out-of-sight objects
 
 		var label = Label.new()
 		label.text = "%s (%s)" % [object_name, object_type]
@@ -5013,6 +5109,18 @@ func _get_object_sprite_path(obj: Dictionary) -> String:
 		return "res://assets/objects/coin_purse.png"
 	if oname.contains("knife") or oid.contains("knife") or oname.contains("blade"):
 		return "res://assets/objects/pocket_kinfe.png"
+	if oname.contains("apple") or oid.contains("apple"):
+		return "res://assets/objects/apple.png"
+	if oname.contains("sandwich") or oid.contains("sandwich"):
+		return "res://assets/objects/sandwich.png"
+	if oname.contains("water bottle") or oid.contains("water"):
+		return "res://assets/objects/water_bottle.png"
+	if oname.contains("coffee") or oid.contains("coffee") and oid.contains("item_"):
+		return "res://assets/objects/coffee_cup.png"
+	if otype == "trash_item" or oname.contains("wrapper") or oname.contains("scraps"):
+		return "res://assets/objects/trash_wrapper.png"
+	if oname.contains("rubbish") or oname.contains("bin") or oid.contains("trash_bin"):
+		return "res://assets/objects/trash_bin.png"
 
 	return ""
 
@@ -5073,6 +5181,10 @@ func _get_object_type_color(object_type: String) -> Color:
 			return Color(0.98, 0.37, 0.68)
 		"fixture":
 			return Color(0.72, 0.76, 0.82)
+		"consumable":
+			return Color(0.25, 1.00, 0.40)  # bright green — food/drink stands out
+		"trash_item":
+			return Color(0.55, 0.42, 0.20)  # brown — clearly different from food
 		_:
 			return Color(0.85, 0.85, 0.85)
 
@@ -5085,6 +5197,10 @@ func _get_object_marker_radius(object_type: String) -> float:
 		"decor":
 			return 8.0
 		"fixture":
+			return 7.0
+		"consumable":
+			return 9.0  # slightly larger so food items are easy to spot
+		"trash_item":
 			return 7.0
 		_:
 			return 7.0

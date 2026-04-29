@@ -17,6 +17,12 @@ var has_initial_position = false
 var _idle_turn_count: int = 0  # counts idle steps; prevents direction oscillation
 var speech_label: Label = null
 var _speech_timer: float = 0.0
+var _hp_bar_bg: ColorRect = null
+var _hp_bar_fill: ColorRect = null
+
+const HP_BAR_WIDTH   := 28.0
+const HP_BAR_HEIGHT  := 4.0
+const HP_BAR_OFFSET  := Vector2(-14.0, -46.0)  # above sprite, below name label
 
 func _ready():
 	var npc_tex = load("res://assets/sprites/generic_male.png") as Texture2D
@@ -62,6 +68,21 @@ func _ready():
 	speech_label.add_theme_stylebox_override("normal", bg)
 	speech_label.visible = false
 	add_child(speech_label)
+
+	# HP bar — background track + fill bar above sprite
+	_hp_bar_bg = ColorRect.new()
+	_hp_bar_bg.size = Vector2(HP_BAR_WIDTH, HP_BAR_HEIGHT)
+	_hp_bar_bg.position = HP_BAR_OFFSET
+	_hp_bar_bg.color = Color(0.15, 0.15, 0.15, 0.85)
+	_hp_bar_bg.visible = false  # hidden when full health
+	add_child(_hp_bar_bg)
+
+	_hp_bar_fill = ColorRect.new()
+	_hp_bar_fill.size = Vector2(HP_BAR_WIDTH, HP_BAR_HEIGHT)
+	_hp_bar_fill.position = HP_BAR_OFFSET
+	_hp_bar_fill.color = Color(0.20, 0.85, 0.25)
+	_hp_bar_fill.visible = false
+	add_child(_hp_bar_fill)
 
 func _process(delta):
 	if _speech_timer > 0.0:
@@ -121,17 +142,27 @@ func show_speech(text: String, duration: float = 6.0) -> void:
 
 func _update_label():
 	"""Update the text label above the agent"""
-	# Keep long activities visible without flooding the label.
 	var activity_display = current_activity
 	if activity_display.length() > 70:
 		activity_display = activity_display.substr(0, 67) + "..."
+	label.text = "%s\n%s\n@ %s" % [agent_name, activity_display, current_location]
 
-	var health_bar = ""
-	if health < 100:
-		var filled = int(health / 10)
-		health_bar = "\n[" + "█".repeat(filled) + "░".repeat(10 - filled) + "] %d" % health
-
-	label.text = "%s\n%s\n@ %s%s" % [agent_name, activity_display, current_location, health_bar]
+	# Graphical HP bar — only visible when below full health
+	var show_bar = health < 100 or is_incapacitated
+	if _hp_bar_bg != null:
+		_hp_bar_bg.visible = show_bar
+	if _hp_bar_fill != null:
+		_hp_bar_fill.visible = show_bar
+		if show_bar:
+			var pct = clampf(float(health) / 100.0, 0.0, 1.0)
+			_hp_bar_fill.size = Vector2(HP_BAR_WIDTH * pct, HP_BAR_HEIGHT)
+			# Color: green → yellow → red as HP drops
+			if pct > 0.6:
+				_hp_bar_fill.color = Color(0.20, 0.85, 0.25)
+			elif pct > 0.3:
+				_hp_bar_fill.color = Color(1.00, 0.75, 0.10)
+			else:
+				_hp_bar_fill.color = Color(0.90, 0.15, 0.10)
 
 func _update_appearance():
 	"""Change color based on activity/state"""
