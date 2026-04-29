@@ -44,6 +44,7 @@ public class ActionResolver {
         "place_object","flat_surface",
         "observe",     "can_observe",
         "inspect",     "interactive"
+        // "use" is checked dynamically (consumable OR usable+produces_item)
     );
 
     // ── Verb → required inventory grant ──────────────────────────────────────
@@ -153,6 +154,25 @@ public class ActionResolver {
         // 5. Generic inventory grant check (e.g. write requires writing_utensil)
         if (VERB_REQUIRES_GRANT.containsKey(verb)) {
             return checkGenericGrant(action, verb);
+        }
+
+        // 6. Use: must be consumable OR a usable machine that produces an item
+        if ("use".equals(verb)) {
+            Map<String, Object> props = mergedProperties(target);
+            boolean isConsumable = Boolean.TRUE.equals(props.get("consumable"));
+            boolean isMachine = Boolean.TRUE.equals(props.get("usable")) && props.containsKey("produces_item");
+            if (!isConsumable && !isMachine) {
+                return ResolveResult.reject(RejectReason.AFFORDANCE_DENIED,
+                    "'" + target.getName() + "' cannot be used (not consumable or a production machine)");
+            }
+            // Consumable must be held by the actor
+            if (isConsumable) {
+                Map<String, InventoryItem> inv = inventoryByActor.getOrDefault(action.getActorId(), Map.of());
+                if (!inv.containsKey(target.getInstanceId())) {
+                    return ResolveResult.reject(RejectReason.MISSING_GRANT,
+                        "'" + action.getActorId() + "' must be holding '" + target.getName() + "' to use it");
+                }
+            }
         }
 
         return ResolveResult.permit();
@@ -437,6 +457,27 @@ public class ActionResolver {
             if (Boolean.TRUE.equals(props.get("flat_surface")) && !inventory.isEmpty()) {
                 descriptors.add(new ActionDescriptor("place_object", id, name, "object", "Place Item",
                         distStr + ", flat surface — you are carrying something"));
+            }
+
+            // Production machine (e.g. coffee machine) — usable from nearby
+            if (Boolean.TRUE.equals(props.get("usable")) && props.containsKey("produces_item")) {
+                String produces = String.valueOf(props.get("produces_item"));
+                descriptors.add(new ActionDescriptor("use", id, name, "object", "Use " + name,
+                        distStr + ", produces " + produces));
+            }
+        }
+
+        // Consumable items the actor is holding — always available regardless of range
+        for (InventoryItem heldItem : inventory.values()) {
+            WorldObjectInstance heldObj = objectInstances.get(heldItem.getId());
+            if (heldObj != null) {
+                Map<String, Object> heldProps = mergedProperties(heldObj);
+                if (Boolean.TRUE.equals(heldProps.get("consumable"))) {
+                    int heal = heldProps.get("heal_amount") instanceof Number
+                        ? ((Number) heldProps.get("heal_amount")).intValue() : 20;
+                    descriptors.add(new ActionDescriptor("use", heldItem.getId(), heldObj.getName(), "object",
+                            "Eat/Drink " + heldObj.getName(), "in inventory, restores " + heal + " HP"));
+                }
             }
         }
 

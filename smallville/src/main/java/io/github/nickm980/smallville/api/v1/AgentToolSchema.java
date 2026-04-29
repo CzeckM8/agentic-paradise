@@ -128,14 +128,15 @@ public class AgentToolSchema {
     private static ToolDefinition commitAction() {
         return new ToolDefinition(
             "commit_action",
-            "Execute a world action. This is the ONLY tool that can change world state. It is validated by the action resolver — it may be rejected if out of range, missing affordance, or missing item. Calling this ends the turn regardless of result.",
+            "Execute a world action. This is the ONLY tool that can change world state. It is validated by the action resolver — it may be rejected if out of range, missing affordance, or missing item. Calling this ends the turn regardless of result. You may also include an optional 'speech' blurb (one short sentence) that will be broadcast as a free action this turn — use this to comment on what you're doing or express an emotion while acting.",
             Map.of(
                 "type", "object",
                 "properties", Map.of(
-                    "verb", Map.of("type", "string", "description", "Action verb (carry, open, close, write, speak, give, observe, sit, place_object, unlock, lock, wait, punch, kick, tackle, attack)"),
+                    "verb", Map.of("type", "string", "description", "Action verb (carry, open, close, write, speak, give, observe, sit, place_object, unlock, lock, use, wait, punch, kick, tackle, attack)"),
                     "target_id", Map.of("type", "string", "description", "ID of the target object or agent name"),
                     "target_type", Map.of("type", "string", "description", "Type: 'agent', 'player', or 'object'"),
-                    "payload", Map.of("type", "string", "description", "Optional: speech text, item name, or written content")
+                    "payload", Map.of("type", "string", "description", "Optional: speech text (for speak verb), item name, or written content"),
+                    "speech", Map.of("type", "string", "description", "Optional: actual words you say OUT LOUD to a nearby person (1 short sentence max). Only include this if you are genuinely speaking to someone. Do NOT use to describe your own actions or what you are doing — that is not speech.")
                 ),
                 "required", List.of("verb", "target_id", "target_type")
             )

@@ -484,12 +484,14 @@ public final class SimulationController {
 
 	List<Map<String, Object>> npcSpeeches = service.drainNpcSpeeches();
 	List<Map<String, Object>> npcActions  = service.drainNpcActions();
+	boolean objectsChanged = service.drainNpcObjectsDirty();
 	Map<String, Object> deltaResponse = new java.util.LinkedHashMap<>();
 	deltaResponse.put("agents", agentDeltas);
 	deltaResponse.put("location_states", locations);
 	deltaResponse.put("time", time);
 	deltaResponse.put("npc_speeches", npcSpeeches);
 	deltaResponse.put("npc_actions", npcActions);
+	deltaResponse.put("objects_changed", objectsChanged);
 	ctx.json(deltaResponse);
     }
 

@@ -105,6 +105,7 @@ public class SimulationService {
 	private final Map<String, WorldObjectInstance> objectInstances = new ConcurrentHashMap<>();
 	private final List<Map<String, Object>> pendingNpcSpeeches = new java.util.concurrent.CopyOnWriteArrayList<>();
 	private final List<Map<String, Object>> pendingNpcActions  = new java.util.concurrent.CopyOnWriteArrayList<>();
+	private volatile boolean npcObjectsDirty = false;
 	private final Map<String, LinkedHashSet<String>> inventoryByAgent = new ConcurrentHashMap<>();
 	private final Map<String, RuntimeAgentState> runtimeStateByAgent = new ConcurrentHashMap<>();
 	private final Map<String, Deque<ReactiveEvent>> reactiveEventsByAgent = new ConcurrentHashMap<>();
@@ -315,6 +316,13 @@ public class SimulationService {
         return result;
     }
 
+    /** Returns true (and resets the flag) when an NPC action moved or created a world object. */
+    public boolean drainNpcObjectsDirty() {
+        boolean dirty = npcObjectsDirty;
+        npcObjectsDirty = false;
+        return dirty;
+    }
+
     // ── Global simulation clock ───────────────────────────────────────────────
 
     public void startGlobalSimulationClock() {
@@ -442,6 +450,61 @@ public class SimulationService {
             }
         }
 
+        // (c) Low-priority food/healing intent — inject only when not already occupied by combat
+        if (pendingIntent == null) {
+            int hp = agent.getHealth();
+            // Find consumable in inventory first
+            InventoryItem heldFood = agent.getInventory().values().stream()
+                .filter(item -> {
+                    WorldObjectInstance obj = objectInstances.get(item.getId());
+                    return obj != null && obj.getProperties() != null
+                        && Boolean.TRUE.equals(obj.getProperties().get("consumable"))
+                        && !Boolean.TRUE.equals(obj.getProperties().get("is_trash"));
+                }).findFirst().orElse(null);
+
+            if (hp < 50) {
+                if (heldFood != null) {
+                    pendingIntent = "** CRITICAL: Health at " + hp + "/100. You are carrying "
+                        + heldFood.getDisplayName() + " (id=" + heldFood.getId() + ")."
+                        + " commit_action(verb=\"use\", target_id=\"" + heldFood.getId()
+                        + "\", target_type=\"object\") RIGHT NOW to eat/drink it and recover HP. **";
+                } else {
+                    WorldObjectInstance nearestFood = findNearestFoodItem(agent);
+                    if (nearestFood != null) {
+                        int foodTileX = (int)(nearestFood.getX() / TILE_SIZE);
+                        int foodTileY = (int)(nearestFood.getY() / TILE_SIZE);
+                        int myTileX = (int)(agent.getX() / TILE_SIZE);
+                        int myTileY = (int)(agent.getY() / TILE_SIZE);
+                        int dist = Math.abs(foodTileX - myTileX) + Math.abs(foodTileY - myTileY);
+                        String foodLoc = nearestFood.getLocation() != null ? nearestFood.getLocation() : "";
+                        if (dist <= 4) {
+                            pendingIntent = "** CRITICAL: Health at " + hp + "/100. "
+                                + nearestFood.getName() + " (id=" + nearestFood.getInstanceId() + ") is RIGHT HERE. "
+                                + "commit_action(verb=\"carry\", target_id=\"" + nearestFood.getInstanceId()
+                                + "\", target_type=\"object\") to pick it up NOW. **";
+                        } else {
+                            pendingIntent = "** CRITICAL: Health at " + hp + "/100. You need food urgently. "
+                                + "Nearest food: " + nearestFood.getName() + " (id=" + nearestFood.getInstanceId()
+                                + ") at tile (" + foodTileX + "," + foodTileY + ")"
+                                + (foodLoc.isBlank() ? "" : " in location \"" + foodLoc + "\"")
+                                + " — " + dist + " tiles away. "
+                                + "Step 1: call update_plan(activity=\"going to get food\""
+                                + (foodLoc.isBlank() ? "" : ", target_location=\"" + foodLoc + "\"")
+                                + "). Step 2: commit_action(verb=\"wait\", target_id=\"self\", target_type=\"agent\"). "
+                                + "You will automatically move toward food. **";
+                        }
+                    } else {
+                        pendingIntent = "** CRITICAL: Health at " + hp + "/100. Head to the market area to find food. **";
+                    }
+                }
+            } else if (hp < 80 && heldFood != null) {
+                pendingIntent = "** You are injured (" + hp + "/100) and carrying "
+                    + heldFood.getDisplayName() + " (id=" + heldFood.getId() + ")."
+                    + " commit_action(verb=\"use\", target_id=\"" + heldFood.getId()
+                    + "\", target_type=\"object\") to eat it now. **";
+            }
+        }
+
         return new AgentTurnContext(
             agent,
             agent.getLegalActions() != null ? agent.getLegalActions() : new ArrayList<>(),
@@ -516,21 +579,81 @@ public class SimulationService {
             "I " + result.verb + " " + result.targetId +
             (result.payload != null && !result.payload.isBlank() ? ": \"" + result.payload + "\"" : "")));
 
+        // Clear pending movement so advanceAgentMovement doesn't also act this same turn.
+        // The tool loop manages movement via update_plan; the old action queue is redundant here.
+        if (!"wait".equalsIgnoreCase(result.verb)) {
+            agent.clearActions();
+            agent.setTargetLocation(null);
+        }
+
         // Verb-specific state mutations via WorldStateMutator (Tier 4)
         WorldAction.TargetType targetType = parseTargetTypeString(result.targetType);
         String mutationNarrative = new WorldStateMutator(world, objectInstances)
             .apply(agent, result.verb, result.targetId, targetType, result.payload, turnCounter.get());
         if (mutationNarrative != null && !mutationNarrative.isBlank()) {
+            npcObjectsDirty = true; // flag Godot to refresh world objects on next delta poll
             // Overwrite the generic memory entry with the richer mutation narrative
             agent.getMemoryStream().add(
                 new io.github.nickm980.smallville.memory.Observation("I " + mutationNarrative));
         }
 
-        // Combat verbs: wire retaliation, EpistemicMemory, and knockback
+        // Combat verbs: re-validate range at apply-time (decision was async; target may have moved)
         if (isAggressiveActionType(result.verb)) {
             Agent combatTarget = world.getAgent(result.targetId).orElse(null);
             if (combatTarget != null) {
-                String narrative = agent.getFullName() + " attacked " + result.targetId + " using " + result.verb;
+                String verbLower = result.verb.toLowerCase();
+                int distNow = tileManhattanDistance(agent.getX(), agent.getY(), combatTarget.getX(), combatTarget.getY());
+                boolean inRange;
+                if ("punch".equals(verbLower) || "kick".equals(verbLower)) {
+                    inRange = distNow <= 2;
+                } else if ("tackle".equals(verbLower)) {
+                    inRange = distNow >= 2 && distNow <= 3;
+                } else {
+                    inRange = distNow <= 4; // attack/generic: slightly more lenient
+                }
+                if (!inRange) {
+                    LOG.info("[TurnResult] {} {} missed {} — target moved since decision (dist={}t)",
+                        agent.getFullName(), result.verb, result.targetId, distNow);
+                    agent.setCurrentActivity("missed " + result.targetId);
+                    agent.getMemoryStream().add(new io.github.nickm980.smallville.memory.Observation(
+                        "I tried to " + result.verb + " " + result.targetId + " but they were too far away."));
+                    return;
+                }
+                // Tackle: snap acting NPC to closest adjacent tile of target (mirrors player tackle)
+                if ("tackle".equals(verbLower)) {
+                    double[][] adjacentTiles = {
+                        {combatTarget.getX() + TILE_SIZE, combatTarget.getY()},
+                        {combatTarget.getX() - TILE_SIZE, combatTarget.getY()},
+                        {combatTarget.getX(), combatTarget.getY() + TILE_SIZE},
+                        {combatTarget.getX(), combatTarget.getY() - TILE_SIZE}
+                    };
+                    double bestDist = Double.MAX_VALUE;
+                    double newX = agent.getX(), newY = agent.getY();
+                    for (double[] tile : adjacentTiles) {
+                        double cx = snapToTile(tile[0]);
+                        double cy = snapToTile(tile[1]);
+                        double d = Math.abs(cx - agent.getX()) + Math.abs(cy - agent.getY());
+                        if (d < bestDist) {
+                            bestDist = d;
+                            newX = cx;
+                            newY = cy;
+                        }
+                    }
+                    agent.setPosition(newX, newY);
+                }
+                // Apply damage and stress (was previously missing — hits logged but no health loss)
+                int damage = computeVerbDamage(agent, verbLower);
+                combatTarget.applyDamage(damage);
+                combatTarget.applyStressChange(0.15);
+                agent.applyStressChange(0.05);
+                String hitDesc = buildCombatHitDescription(agent.getFullName(), verbLower, damage);
+                io.github.nickm980.smallville.memory.Observation hitObs =
+                    new io.github.nickm980.smallville.memory.Observation(hitDesc);
+                hitObs.setImportance(9);
+                combatTarget.getMemoryStream().add(hitObs);
+
+                String narrative = agent.getFullName() + " attacked " + result.targetId + " using " + result.verb
+                    + " for " + damage + " damage";
                 ChronicleEvent combatEvt = appendChronicle(
                     agent.getFullName(), "agent", result.verb,
                     result.targetId, result.targetType != null ? result.targetType : "agent",
@@ -560,16 +683,28 @@ public class SimulationService {
                 LOG.info("[NpcSpeech] {} speaks to player: {}", agent.getFullName(), result.payload.substring(0, Math.min(60, result.payload.length())));
             }
         }
-        // Capture NPC combat/significant actions directed at the player for the action log
-        if (isAggressiveActionType(result.verb) || "give".equalsIgnoreCase(result.verb)) {
-            Agent player = findPrimaryPlayer();
-            if (player != null && (player.getFullName().equals(result.targetId)
-                    || "player".equalsIgnoreCase(result.targetType))) {
+        // Free-action blurb: broadcast alongside any verb (not just speak)
+        if (result.speech != null && !result.speech.isBlank() && !"speak".equalsIgnoreCase(result.verb)) {
+            Map<String, Object> blurb = new java.util.LinkedHashMap<>();
+            blurb.put("speaker", agent.getFullName());
+            blurb.put("text", result.speech);
+            pendingNpcSpeeches.add(blurb);
+            LOG.info("[NpcBlurb] {} says: {}", agent.getFullName(), result.speech.substring(0, Math.min(60, result.speech.length())));
+        }
+        // Log all non-movement, non-wait NPC committed actions to the action log.
+        // This includes object interactions (carry, use, place_object, open, etc.) and
+        // combat/give regardless of whether the target is the player.
+        if (!"wait".equalsIgnoreCase(result.verb) && !"observe".equalsIgnoreCase(result.verb)) {
+            String narrative = mutationNarrative != null && !mutationNarrative.isBlank()
+                ? mutationNarrative : result.verb + " " + result.targetId;
+            // For speech targeted at player, narrative is already added via pendingNpcSpeeches
+            if (!"speak".equalsIgnoreCase(result.verb)) {
                 Map<String, Object> npcAction = new java.util.LinkedHashMap<>();
                 npcAction.put("actor", agent.getFullName());
                 npcAction.put("verb", result.verb);
-                npcAction.put("narrative", mutationNarrative != null && !mutationNarrative.isBlank()
-                    ? mutationNarrative : result.verb + " " + result.targetId);
+                npcAction.put("narrative", narrative);
+                npcAction.put("ax", (int)(agent.getX() / TILE_SIZE));
+                npcAction.put("ay", (int)(agent.getY() / TILE_SIZE));
                 pendingNpcActions.add(npcAction);
             }
         }
@@ -589,6 +724,7 @@ public class SimulationService {
             case "place_object" -> "placing object on " + targetId;
             case "unlock"       -> "unlocking " + targetId;
             case "lock"         -> "locking " + targetId;
+            case "use"          -> "using " + targetId;
             case "wait"         -> "waiting";
             default             -> verb + " " + targetId;
         };
@@ -937,8 +1073,10 @@ public class SimulationService {
 	    player.getStress()
 	);
 	response.setInventory(getInventoryArray(player));
+	Set<String> playerInvIds = new LinkedHashSet<>(getInventorySet(player));
+	player.getInventory().keySet().forEach(playerInvIds::add);
 	response.setInventoryObjects(
-	    getInventorySet(player).stream()
+	    playerInvIds.stream()
 		.map(id -> objectInstances.get(id))
 		.filter(obj -> obj != null)
 		.map(WorldObjectInstance::toMap)
@@ -1233,6 +1371,7 @@ public class SimulationService {
 			if (toDrop != null && isObjectInInventory(player, objId)) {
 				LinkedHashSet<String> inv = getInventorySet(player);
 				inv.remove(objId);
+				player.removeInventoryItem(objId);
 				if (toDrop.getProperties() == null) toDrop.setProperties(new HashMap<>());
 				toDrop.getProperties().remove("heldBy");
 				toDrop.setHeldBy(null);
@@ -1246,6 +1385,38 @@ public class SimulationService {
 				res.setResult("Nothing to drop");
 			}
 			res.setPlayerState(fromAgentWithInventory(player));
+			return res;
+		}
+
+		if ("use".equalsIgnoreCase(request.getActionType())) {
+			String target = request.getTargetAgent();
+			if (target == null || target.isBlank()) {
+				throw new SmallvilleException("targetAgent required for use");
+			}
+			String objId = target.startsWith("object:") ? target.substring(7) : target;
+			WorldObjectInstance useTarget = objectInstances.get(objId);
+			if (useTarget == null) {
+				throw new SmallvilleException("Object '" + objId + "' not found");
+			}
+			Map<String, Object> useProps = useTarget.getProperties() != null ? useTarget.getProperties() : new HashMap<>();
+			boolean isConsumable = Boolean.TRUE.equals(useProps.get("consumable"));
+			boolean isMachine = Boolean.TRUE.equals(useProps.get("usable")) && useProps.containsKey("produces_item");
+			if (!isConsumable && !isMachine) {
+				throw new SmallvilleException(useTarget.getName() + " cannot be used");
+			}
+			if (isConsumable && !isObjectInInventory(player, objId)) {
+				throw new SmallvilleException("You must be holding " + useTarget.getName() + " to use it");
+			}
+			String useNarrative = new WorldStateMutator(world, objectInstances)
+				.apply(player, "use", objId, WorldAction.TargetType.OBJECT, null, turnCounter.get());
+			player.setCurrentActivity(useNarrative != null ? useNarrative : "used " + useTarget.getName());
+			player.applyStressChange(-0.05);
+			res.setResult(useNarrative != null ? useNarrative : "Used " + useTarget.getName());
+			res.setPlayerState(fromAgentWithInventory(player));
+			res.setStressChange(-0.05);
+			appendChronicle(player.getFullName(), "player", "use", objId, "object",
+				useNarrative != null ? useNarrative : "used " + useTarget.getName(),
+				player.getX(), player.getY(), useTarget.getX(), useTarget.getY());
 			return res;
 		}
 
@@ -2370,10 +2541,6 @@ public class SimulationService {
 	    RuntimeAgentState state = runtimeStateByAgent.computeIfAbsent(agent.getFullName(), k -> new RuntimeAgentState());
 	    boolean isAware = isAgentAware(agent, playerLocation, request.getPlayerX(), request.getPlayerY(), request.getAwarenessRadius());
 	    traceTrackedAgent(agent, state, "start-turn");
-	    // Passive health recovery and environment scan
-	    if (!agent.isIncapacitated() && agent.getHealth() < 100) {
-		agent.recoverHealth(2);
-	    }
 	    AgenticRuntimeState agenticState = agenticStateByAgent.computeIfAbsent(agent.getFullName(), k -> new AgenticRuntimeState());
 	    scanEnvironment(agent, agenticState);
 	    LocalDate lastOrchestratedDate = state.lastOrchestratedAt == null ? null : state.lastOrchestratedAt.toLocalDate();
@@ -2496,13 +2663,16 @@ public class SimulationService {
     }
 
     private boolean shouldTriggerLlmReaction(ReactiveEvent event, boolean isAware) {
-	if (event.severity >= 8) {
-	    return true;
-	}
-	if (event.playerInvolved && isAware && event.severity >= 5) {
-	    return true;
-	}
-	return false;
+        // Severity-8+ events (combat, critical incidents) are handled by the tool loop's
+        // pendingIntent and hostile-on-sight logic. Firing prompts.react() for these would
+        // block the tool loop with a context-free generic response.
+        if (event.severity >= 8) {
+            return false;
+        }
+        if (event.playerInvolved && isAware && event.severity >= 5) {
+            return true;
+        }
+        return false;
     }
 
     private boolean isAgentAware(Agent agent, Location playerLocation, Double playerX, Double playerY, double radius) {
@@ -2644,20 +2814,75 @@ public class SimulationService {
 		refreshBeliefModels(agent, state);
 
 		// ── Agentic Tool Loop (Tier 3) ────────────────────────────────────────────
-		// LLM as executive: each turn the model calls read-only tools to reason about
-		// the world, then calls commit_action to act. The job runs async; mutations
-		// are applied on the main thread via pendingCognitionApplies.
-		// advanceAgentMovement() still executes below to keep the agent moving toward
-		// any target location set by update_plan or a prior turn's commit.
+		// Legal actions and spatial knowledge are cheap; compute them before any
+		// guard so the survival override and the LLM briefing both see fresh data.
+		injectLegalActions(agent);
+		if (agent.getSpatialKnowledge().isEmpty()) {
+			seedSpatialKnowledge(agent);
+		}
+
+		// === Deterministic survival override: skip LLM when critically injured ===
+		// Placed BEFORE the cognitionInFlight guard so a slow/stuck LLM call
+		// cannot freeze a critically injured agent — survival always wins.
+		boolean hasCombatGoal = state != null && !state.goalPlan.isEmpty()
+			&& state.goalPlan.peek() != null
+			&& isAggressiveActionType(state.goalPlan.peek().actionType != null
+				? state.goalPlan.peek().actionType : "");
+		if (agent.getHealth() < 50 && !hasCombatGoal) {
+			// Case 1: Holding consumable food → eat it immediately
+			InventoryItem heldFood = agent.getInventory().values().stream()
+				.filter(item -> {
+					WorldObjectInstance obj = objectInstances.get(item.getId());
+					return obj != null && obj.getProperties() != null
+						&& Boolean.TRUE.equals(obj.getProperties().get("consumable"))
+						&& !Boolean.TRUE.equals(obj.getProperties().get("is_trash"));
+				}).findFirst().orElse(null);
+			if (heldFood != null) {
+				LOG.info("[SurvivalOverride] {} eating {} (hp={})", agent.getFullName(), heldFood.getDisplayName(), agent.getHealth());
+				applyTurnResult(agent, TurnResult.committed("use", heldFood.getId(), "object", null, null, new ArrayList<>()));
+				return;
+			}
+			// Case 2: Pick the closer of nearest consumable food item and nearest machine
+			WorldObjectInstance nearestFood = findNearestFoodItem(agent);
+			WorldObjectInstance nearestMachine = findNearestMachine(agent);
+			if (nearestFood == null) {
+				nearestFood = nearestMachine;
+			} else if (nearestMachine != null) {
+				double fdx = nearestFood.getX() - agent.getX(), fdy = nearestFood.getY() - agent.getY();
+				double mdx = nearestMachine.getX() - agent.getX(), mdy = nearestMachine.getY() - agent.getY();
+				if (mdx * mdx + mdy * mdy < fdx * fdx + fdy * fdy) nearestFood = nearestMachine;
+			}
+			if (nearestFood != null) {
+				double dx = nearestFood.getX() - agent.getX();
+				double dy = nearestFood.getY() - agent.getY();
+				double dist = Math.sqrt(dx * dx + dy * dy) / TILE_SIZE;
+				if (dist <= 4.0) {
+					String verb = (nearestFood.getProperties() != null
+						&& Boolean.TRUE.equals(nearestFood.getProperties().get("usable"))) ? "use" : "carry";
+					LOG.info("[SurvivalOverride] {} {}ing '{}' (hp={}, dist={}t)", agent.getFullName(), verb, nearestFood.getName(), agent.getHealth(), (int)dist);
+					applyTurnResult(agent, TurnResult.committed(verb, nearestFood.getInstanceId(), "object", null, null, new ArrayList<>()));
+				} else {
+					String foodLoc = nearestFood.getLocation() != null ? nearestFood.getLocation() : "";
+					if (!foodLoc.isBlank()) {
+						world.getLocation(foodLoc).ifPresent(loc -> agent.setTargetLocation(loc.getFullPath()));
+					}
+					agent.setCurrentActivity("seeking food");
+					LOG.info("[SurvivalOverride] {} navigating to '{}' (hp={}, dist={}t)", agent.getFullName(), nearestFood.getName(), agent.getHealth(), (int)dist);
+					applyTurnResult(agent, TurnResult.committed("wait", "self", "agent", null, null, new ArrayList<>()));
+				}
+				return;
+			}
+		}
+		// === End survival override ===
+
+		// Defer new LLM submissions while a prior cognition is still running.
+		// (Placed after the survival override so critically injured agents always act.)
 		if (cognitionInFlight.contains(agent.getFullName())) {
 			LOG.debug("[AgenticLoop] {} cognition in flight — deferring reasoning this turn",
 				agent.getFullName());
 			return;
 		}
-		injectLegalActions(agent);
-		if (agent.getSpatialKnowledge().isEmpty()) {
-			seedSpatialKnowledge(agent);
-		}
+
 		AgentTurnContext ctx = buildAgentTurnContext(agent, now);
 		AtomicReference<TurnResult> resultRef = new AtomicReference<>();
 		final int currentTurn = turnCounter.get();
@@ -2804,6 +3029,38 @@ public class SimulationService {
 			}
 		}
 		return null;
+	}
+
+	private WorldObjectInstance findNearestFoodItem(Agent agent) {
+		return objectInstances.values().stream()
+			.filter(obj -> {
+				if (obj.getProperties() == null) return false;
+				if (!Boolean.TRUE.equals(obj.getProperties().get("consumable"))) return false;
+				if (Boolean.TRUE.equals(obj.getProperties().get("is_trash"))) return false;
+				String heldBy = obj.getHeldBy();
+				return heldBy == null || heldBy.isBlank();
+			})
+			.min(Comparator.comparingDouble(obj -> {
+				double dx = obj.getX() - agent.getX();
+				double dy = obj.getY() - agent.getY();
+				return dx * dx + dy * dy;
+			}))
+			.orElse(null);
+	}
+
+	private WorldObjectInstance findNearestMachine(Agent agent) {
+		return objectInstances.values().stream()
+			.filter(obj -> {
+				if (obj.getProperties() == null) return false;
+				return Boolean.TRUE.equals(obj.getProperties().get("usable"))
+					&& obj.getProperties().containsKey("produces_item");
+			})
+			.min(Comparator.comparingDouble(obj -> {
+				double dx = obj.getX() - agent.getX();
+				double dy = obj.getY() - agent.getY();
+				return dx * dx + dy * dy;
+			}))
+			.orElse(null);
 	}
 
 	// -------------------------------------------------------------------------
@@ -3278,6 +3535,7 @@ public class SimulationService {
 		if (flair.contains("action:study"))        return "study";
 		if (flair.contains("action:light"))        return "light";
 		if (flair.contains("action:inspect"))      return "inspect";
+		if (flair.contains("action:use"))          return "use";
 
 		String lower = goal.actionDescription == null ? "" : goal.actionDescription.toLowerCase();
 		if (lower.contains("carry") || lower.contains("pick up") || lower.contains("steal")) return "carry";
@@ -3504,6 +3762,16 @@ public class SimulationService {
 			if (flair.contains("action:light") || lower.startsWith("illuminat") || lower.startsWith("light")) {
 				agent.applyStressChange(-0.01);
 				actionDesc = "lit " + objectTarget.getName();
+			}
+
+			// Use — consumable item or production machine
+			if (flair.contains("action:use") || lower.startsWith("use") || lower.startsWith("eat") || lower.startsWith("drink")) {
+				String useNarrative = new WorldStateMutator(world, objectInstances)
+					.apply(agent, "use", objectTarget.getInstanceId(),
+						WorldAction.TargetType.OBJECT, null, turnCounter.get());
+				if (useNarrative != null) {
+					actionDesc = useNarrative;
+				}
 			}
 
 			agent.setCurrentActivity("agentic: " + actionDesc);
@@ -5738,7 +6006,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		if (actor == null || objectId == null || objectId.isBlank()) {
 			return false;
 		}
-		return getInventorySet(actor).contains(objectId);
+		return getInventorySet(actor).contains(objectId) || actor.getInventory().containsKey(objectId);
 	}
 
 	/**
@@ -5748,7 +6016,11 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 	 */
 	private AgentStateResponse fromAgentWithInventory(Agent actor) {
 		AgentStateResponse r = mapper.fromAgent(actor);
-		List<Map<String, Object>> invObjects = getInventorySet(actor).stream()
+		// Merge typed inventory (InventoryItem map) and legacy string-id set
+		// so that items created by applyUseMachine (typed-only) are included.
+		Set<String> ids = new LinkedHashSet<>(getInventorySet(actor));
+		actor.getInventory().keySet().forEach(ids::add);
+		List<Map<String, Object>> invObjects = ids.stream()
 			.map(id -> objectInstances.get(id))
 			.filter(obj -> obj != null)
 			.map(WorldObjectInstance::toMap)
@@ -5813,7 +6085,9 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 	/** Keeps agent.carriedItemNames in sync so LLM prompts include current inventory. */
 	private void refreshAgentCarriedItems(Agent actor) {
 		if (actor == null) return;
-		List<String> names = getInventorySet(actor).stream()
+		Set<String> allIds = new LinkedHashSet<>(getInventorySet(actor));
+		actor.getInventory().keySet().forEach(allIds::add);
+		List<String> names = allIds.stream()
 			.map(id -> objectInstances.get(id))
 			.filter(obj -> obj != null)
 			.map(obj -> obj.getName())

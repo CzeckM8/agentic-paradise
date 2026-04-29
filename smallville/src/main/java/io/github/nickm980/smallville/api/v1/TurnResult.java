@@ -26,6 +26,9 @@ public class TurnResult {
     /** Optional payload (speech text, item name, etc.) — may be null. */
     public final String payload;
 
+    /** Optional free-action blurb spoken alongside the main action (max 1 per turn). */
+    public final String speech;
+
     /** Rejection explanation if committed=false and ActionResolver ran. Null on iteration timeout. */
     public final String rejectExplanation;
 
@@ -36,29 +39,30 @@ public class TurnResult {
     public final boolean wasIterationFallback;
 
     private TurnResult(boolean committed, String verb, String targetId, String targetType,
-                       String payload, String rejectExplanation,
+                       String payload, String speech, String rejectExplanation,
                        List<ToolCall> toolCallsMade, boolean wasIterationFallback) {
         this.committed = committed;
         this.verb = verb;
         this.targetId = targetId;
         this.targetType = targetType;
         this.payload = payload;
+        this.speech = speech;
         this.rejectExplanation = rejectExplanation;
         this.toolCallsMade = toolCallsMade;
         this.wasIterationFallback = wasIterationFallback;
     }
 
     public static TurnResult committed(String verb, String targetId, String targetType,
-                                       String payload, List<ToolCall> calls) {
-        return new TurnResult(true, verb, targetId, targetType, payload, null, calls, false);
+                                       String payload, String speech, List<ToolCall> calls) {
+        return new TurnResult(true, verb, targetId, targetType, payload, speech, null, calls, false);
     }
 
     public static TurnResult rejected(String verb, String targetId, String rejectExplanation,
                                       List<ToolCall> calls) {
-        return new TurnResult(false, verb, targetId, null, null, rejectExplanation, calls, false);
+        return new TurnResult(false, verb, targetId, null, null, null, rejectExplanation, calls, false);
     }
 
     public static TurnResult iterationFallback(List<ToolCall> calls) {
-        return new TurnResult(false, null, null, null, null, null, calls, true);
+        return new TurnResult(false, null, null, null, null, null, null, calls, true);
     }
 }
