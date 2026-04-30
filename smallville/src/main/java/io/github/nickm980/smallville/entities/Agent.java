@@ -70,6 +70,40 @@ public class Agent {
      */
     private String beliefSummary = "";
 
+    /** Visual description generated at agent creation — shown to other agents via scan_nearby. */
+    private String physicalDescription = null;
+
+    /** The location this agent considers home — used for evening return hints. */
+    private String homeLocation = null;
+
+    /** Formatted daily schedule (morning/noon/evening anchors) — injected into situation briefing. */
+    private String dailySchedule = null;
+
+    /**
+     * Pending intent injected into the next turn's LLM briefing by speech consequence processing.
+     * Set when someone speaks a threat, greeting, or key information to this agent.
+     * Consumed (cleared) by buildAgentTurnContext the turn after it is set.
+     */
+    private String pendingDialogueIntent = null;
+
+    /**
+     * Persistent grudges: targetName → simulation turn the grudge expires.
+     * Injected into every turn's situation briefing until expiry.
+     * Uses max-merge so later attacks extend rather than reset the grudge.
+     */
+    private final Map<String, Integer> grudges = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public void addGrudge(String targetName, int expiryTurn) {
+        if (targetName == null || targetName.isBlank()) return;
+        grudges.merge(targetName, expiryTurn, Math::max);
+    }
+
+    /** Returns active grudge targets, pruning expired entries in place. */
+    public List<String> getActiveGrudgeTargets(int currentTurn) {
+        grudges.entrySet().removeIf(e -> e.getValue() <= currentTurn);
+        return new ArrayList<>(grudges.keySet());
+    }
+
     /**
      * What this agent believes to be true about the world.
      * Populated only from PerceptionChannel and BeliefCorrections —
@@ -421,6 +455,44 @@ public class Agent {
 
     public void setBeliefSummary(String beliefSummary) {
         this.beliefSummary = beliefSummary == null ? "" : beliefSummary;
+    }
+
+    // ── Physical description ──────────────────────────────────────────────────
+
+    public String getPhysicalDescription() {
+        return physicalDescription;
+    }
+
+    public void setPhysicalDescription(String physicalDescription) {
+        this.physicalDescription = physicalDescription;
+    }
+
+    // ── Home location and daily schedule ─────────────────────────────────────
+
+    public String getHomeLocation() {
+        return homeLocation;
+    }
+
+    public void setHomeLocation(String homeLocation) {
+        this.homeLocation = homeLocation;
+    }
+
+    public String getDailySchedule() {
+        return dailySchedule;
+    }
+
+    public void setDailySchedule(String dailySchedule) {
+        this.dailySchedule = dailySchedule;
+    }
+
+    // ── Pending dialogue intent (dialogue consequence system) ─────────────────
+
+    public String getPendingDialogueIntent() {
+        return pendingDialogueIntent;
+    }
+
+    public void setPendingDialogueIntent(String intent) {
+        this.pendingDialogueIntent = intent;
     }
 
     // ── Epistemic memory ─────────────────────────────────────────────────────

@@ -7,6 +7,9 @@ public class CreateAgentRequest {
     private List<String> memories;
     private String activity;
     private String location;
+    private String physicalDescription;
+    private String homeLocation;
+    private String dailySchedule;
 
     public String getName() {
 	return name;
@@ -39,4 +42,11 @@ public class CreateAgentRequest {
     public void setMemories(List<String> memories) {
 	this.memories = memories;
     }
+
+    public String getPhysicalDescription() { return physicalDescription; }
+    public void setPhysicalDescription(String physicalDescription) { this.physicalDescription = physicalDescription; }
+    public String getHomeLocation() { return homeLocation; }
+    public void setHomeLocation(String homeLocation) { this.homeLocation = homeLocation; }
+    public String getDailySchedule() { return dailySchedule; }
+    public void setDailySchedule(String dailySchedule) { this.dailySchedule = dailySchedule; }
 }
