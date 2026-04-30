@@ -12,8 +12,9 @@ This report covers User Acceptance Testing for the current integrated build (bac
 ## 1) UAT Objective
 
 Validate that the delivered build supports the expected end-user flow:
-- launch backend,
-- launch client,
+- configure `.env`,
+- generate backend artifact,
+- launch client from Godot,
 - move and perform player actions,
 - observe responsive world/NPC updates.
 
@@ -28,8 +29,8 @@ Validate that the delivered build supports the expected end-user flow:
 
 | ID | Scenario | Expected Result | Actual Result | Status |
 |---|---|---|---|---|
-| UAT-01 | Start backend with provided startup flow | Backend starts and exposes API endpoints | Backend starts via `start_server.bat`; endpoints respond | Pass |
-| UAT-02 | Launch Godot client and connect to backend | Client loads world state from backend | Client loads world and initializes simulation state | Pass |
+| UAT-01 | Configure runtime prerequisites | `.env` is present and backend artifact is generated | `.env` configured and `mvn -DskipTests clean package` generated backend artifact | Pass |
+| UAT-02 | Launch Godot client and connect to backend | Client auto-starts backend (if needed) and loads world state | Client startup triggered backend flow and initialized simulation state | Pass |
 | UAT-03 | Player movement across world | Movement is visible and synchronized with backend turn flow | Movement works and turn processing updates world state | Pass |
 | UAT-04 | Player action dispatch (speak/interact/attack) | Actions are accepted and reflected in simulation | Actions enqueue and process through turn endpoint | Pass |
 | UAT-05 | NPC response after player actions | NPCs react according to simulation/runtime rules | NPC reactions observed; behavior updates visible | Pass |

@@ -25,11 +25,22 @@ This document describes how to deploy and run the current `Agentic Paradise` pro
      - `LLM_MODEL` (optional override)
      - `SERVER_PORT` (default `8080`)
 
-## 3) Backend Deployment (Primary Runtime)
+## 3) Recommended Launch Sequence (Consistent Runtime Flow)
 
-The backend lives in `smallville`.
+Use this sequence for local deployment and demos:
 
-### Option A: Use the project starter script (recommended on Windows)
+1. Create `.env` from `.env.example` and fill required values.
+2. Generate backend artifact from `smallville`:
+   - `mvn -DskipTests clean package`
+3. Open/import `godot-client/project.godot` in Godot 4.x.
+4. Run the project from Godot.
+5. During client startup, `start_server.bat` is triggered automatically when `GET /ping` is unavailable.
+
+## 4) Manual Backend Startup (Fallback / Troubleshooting)
+
+Use this only if auto-start from the client does not succeed.
+
+### Option A: Project starter script (Windows)
 1. From the repository root, run:
    - `start_server.bat`
 2. The script:
@@ -47,13 +58,6 @@ The backend lives in `smallville`.
    - `-Dgoogleai.api.key=...`
    - `-Dllm.provider=google_ai`
    - `-Dllm.model=<model_name>`
-
-## 4) Client Deployment (Godot)
-
-1. Open `godot-client/project.godot` in Godot 4.x.
-2. Confirm backend host/port settings in `godot-client/backend_connector.gd` if needed.
-3. Run the project from Godot.
-4. If backend auto-start is enabled in the client, it attempts to use `start_server.bat` when `GET /ping` is unavailable.
 
 ## 5) Basic Deployment Verification
 
@@ -74,7 +78,7 @@ If deployment fails after config or runtime changes:
 1. Stop running backend/client processes.
 2. Restore known-good `.env` values (or regenerate from `.env.example`).
 3. Remove stale Java process using the configured backend port.
-4. Re-run `start_server.bat`.
+4. Re-run the Godot project (client auto-start path) or run `start_server.bat` manually if needed.
 5. If build artifacts appear corrupted, run `mvn clean package` in `smallville` and restart.
 
 ## 8) Known Deployment Constraints
