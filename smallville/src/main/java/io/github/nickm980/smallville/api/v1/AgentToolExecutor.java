@@ -78,6 +78,9 @@ public class AgentToolExecutor {
                 entry.put("type", other instanceof Player ? "player" : "agent");
                 entry.put("distance_tiles", Math.round(dist / TILE_SIZE * 10.0) / 10.0);
                 entry.put("current_activity", other.getCurrentActivity());
+                if (other.getPhysicalDescription() != null && !other.getPhysicalDescription().isBlank()) {
+                    entry.put("appearance", other.getPhysicalDescription());
+                }
                 nearby.add(entry);
                 // Update mental map
                 String loc = other.getLocation() != null ? other.getLocation().getFullPath() : null;
@@ -194,11 +197,19 @@ public class AgentToolExecutor {
         agent.setCurrentActivity(activity);
         if (targetLocation != null && !targetLocation.isBlank()) {
             world.getLocation(targetLocation).ifPresentOrElse(
-                loc -> agent.setTargetLocation(loc.getFullPath()),
+                loc -> {
+                    // Push a move action so advanceAgentMovement steps toward the target this turn
+                    agent.clearActions();
+                    AgentAction moveAction = new AgentAction("move", activity);
+                    moveAction.setTargetLocation(loc.getFullPath());
+                    agent.enqueueAction(moveAction);
+                    agent.setTargetLocation(loc.getFullPath());
+                },
                 () -> LOG.warn("[ToolExecutor] Unknown location '{}' for {}", targetLocation, agent.getFullName())
             );
         }
-        return "Plan updated: " + activity;
+        return "Plan updated: " + activity
+            + (targetLocation != null && !targetLocation.isBlank() ? " → heading to " + targetLocation : "");
     }
 
     // ── commit_action: validate via ActionResolver, return result (no mutation) ─

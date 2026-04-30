@@ -342,9 +342,11 @@ public class WorldStateMutator {
         int healAmount = props.get("produces_heal_amount") instanceof Number
             ? ((Number) props.get("produces_heal_amount")).intValue() : 30;
 
+        String produceName = produces.isEmpty() ? "Item"
+            : Character.toUpperCase(produces.charAt(0)) + produces.substring(1).toLowerCase();
         String cupId = "item_" + produces + "_" + Math.abs((agent.getFullName() + turnNumber).hashCode() % 100000);
         WorldObjectInstance cup = new WorldObjectInstance(cupId, "consumable",
-            produces.equals("coffee") ? "Coffee" : produces,
+            produceName,
             agent.getX(), agent.getY(),
             agent.getLocation() != null ? agent.getLocation().getFullPath() : null);
 
@@ -353,7 +355,7 @@ public class WorldStateMutator {
         cupProps.put("consumable", true);
         cupProps.put("heal_amount", healAmount);
         cupProps.put("heldBy", agent.getFullName());
-        cupProps.put("description", "A freshly brewed coffee.");
+        cupProps.put("description", "A fresh " + produces + ".");
         cup.setProperties(cupProps);
         cup.setHeldBy(agent.getFullName());
         objectInstances.put(cupId, cup);

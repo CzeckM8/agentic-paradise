@@ -91,6 +91,9 @@ public class SimulationService {
 	/** Agents whose LLM cognition job is currently running in the background. */
 	private final java.util.Set<String> cognitionInFlight =
 		java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
+	/** Epoch-ms when each in-flight cognition was submitted — used to timeout stale flags. */
+	private final ConcurrentHashMap<String, Long> cognitionInFlightSince = new ConcurrentHashMap<>();
+	private static final long COGNITION_TIMEOUT_MS = 45_000L;
 	/** Callbacks produced by worker threads, consumed by the main thread before each turn. */
 	private final java.util.concurrent.ConcurrentLinkedQueue<Runnable> pendingCognitionApplies =
 		new java.util.concurrent.ConcurrentLinkedQueue<>();
@@ -271,6 +274,7 @@ public class SimulationService {
 		private LocalDateTime lastInitiatedAt;
 		private LocalDateTime lastRepliedAt;
 		private String lastError;
+		int lastConversationNudgeTurn = -99; // turn when we last injected a talk-to-someone hint
 		/**
 		 * What this agent believes about each other agent it has observed or heard about.
 		 * Keyed by target agent name. Populated by refreshBeliefModels() before each LLM call.
@@ -450,7 +454,13 @@ public class SimulationService {
             }
         }
 
-        // (c) Low-priority food/healing intent — inject only when not already occupied by combat
+        // (c) Pending dialogue intent from speech received last turn (threats, greetings, questions)
+        if (pendingIntent == null && agent.getPendingDialogueIntent() != null) {
+            pendingIntent = agent.getPendingDialogueIntent();
+            agent.setPendingDialogueIntent(null);
+        }
+
+        // (d) Low-priority food/healing intent — inject only when not already occupied by combat
         if (pendingIntent == null) {
             int hp = agent.getHealth();
             // Find consumable in inventory first
@@ -502,6 +512,105 @@ public class SimulationService {
                     + heldFood.getDisplayName() + " (id=" + heldFood.getId() + ")."
                     + " commit_action(verb=\"use\", target_id=\"" + heldFood.getId()
                     + "\", target_type=\"object\") to eat it now. **";
+            } else if (hp < 80) {
+                // Injured but no held food — hint toward nearby loose food
+                WorldObjectInstance nearbyFood = findNearestFoodItem(agent);
+                if (nearbyFood != null) {
+                    double nfdx = nearbyFood.getX() - agent.getX(), nfdy = nearbyFood.getY() - agent.getY();
+                    int nfdist = (int)(Math.sqrt(nfdx * nfdx + nfdy * nfdy) / TILE_SIZE);
+                    if (nfdist <= 8) {
+                        pendingIntent = "You are injured (" + hp + "/100 HP). "
+                            + nearbyFood.getName() + " (id=" + nearbyFood.getInstanceId() + ") is only "
+                            + nfdist + " tiles away. Consider carrying it now to recover HP.";
+                    }
+                }
+            }
+
+            // Item scarcity: if another injured agent is competing for the same nearby food, signal urgency
+            if (pendingIntent == null && hp < 95) {
+                WorldObjectInstance scarcyFood = findNearestFoodItem(agent);
+                if (scarcyFood != null) {
+                    double afdx = scarcyFood.getX() - agent.getX(), afdy = scarcyFood.getY() - agent.getY();
+                    double agentFoodDist = Math.sqrt(afdx * afdx + afdy * afdy) / TILE_SIZE;
+                    if (agentFoodDist <= 12) {
+                        for (Agent other : world.getAgents()) {
+                            if (other == agent || other instanceof Player) continue;
+                            if (other.getHealth() < 85) {
+                                double ofdx = scarcyFood.getX() - other.getX(), ofdy = scarcyFood.getY() - other.getY();
+                                double otherFoodDist = Math.sqrt(ofdx * ofdx + ofdy * ofdy) / TILE_SIZE;
+                                if (otherFoodDist <= 12) {
+                                    pendingIntent = scarcyFood.getName() + " (id=" + scarcyFood.getInstanceId()
+                                        + ") is " + (int)agentFoodDist + " tiles away — "
+                                        + other.getFullName() + " (hp=" + other.getHealth() + ") is also nearby. Resources are scarce.";
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // (d2) Grudge: confront target if nearby, pursue if not
+        if (pendingIntent == null) {
+            List<String> activeGrudges = agent.getActiveGrudgeTargets(turnCounter.get());
+            for (String grudgeTarget : activeGrudges) {
+                boolean targetNearby = nearby.stream().anyMatch(e -> grudgeTarget.equals(e.get("id")));
+                if (targetNearby) {
+                    pendingIntent = grudgeTarget + " is right here — someone you deeply resent. "
+                        + "React as your character demands: confront them, speak your mind, attack, or hold back and bide your time.";
+                } else {
+                    Map<String, Object> spatial = agent.getSpatialKnowledge().get(grudgeTarget);
+                    String lastLoc = spatial != null ? String.valueOf(spatial.getOrDefault("location", "unknown")) : "unknown";
+                    String locHint = "unknown".equals(lastLoc)
+                        ? "" : " Last known location: \"" + lastLoc + "\".";
+                    pendingIntent = grudgeTarget + " is not nearby, but you deeply resent them." + locHint
+                        + " If your character would pursue them, use update_plan to head toward their last known location.";
+                }
+                break;
+            }
+        }
+
+        // (e) Evening return home hint — low priority, only when nothing else is pressing
+        if (pendingIntent == null && agent.getHomeLocation() != null && !agent.getHomeLocation().isBlank()) {
+            int hour = now.getHour();
+            if (hour >= 18 || hour < 6) {
+                String agentLoc = agent.getLocation() != null ? agent.getLocation().getFullPath() : "";
+                if (!agentLoc.equalsIgnoreCase(agent.getHomeLocation())) {
+                    pendingIntent = "It is " + (hour >= 18 ? "evening" : "late night") + ". Your home is \""
+                        + agent.getHomeLocation() + "\". Consider heading home for the night — "
+                        + "use update_plan(activity=\"heading home\", target_location=\"" + agent.getHomeLocation()
+                        + "\") then commit_action(verb=\"wait\", target_id=\"self\", target_type=\"agent\").";
+                }
+            }
+        }
+
+        // (f) Social initiative
+        if (pendingIntent == null && agent.getHealth() >= 50 && agent.getStressLevel() < 0.75) {
+            int ct = turnCounter.get();
+            // (f1) Someone nearby — nudge a conversation if we haven't recently
+            Map<String, Object> nearbyNpc = nearby.stream()
+                .filter(e -> "agent".equals(e.get("type")))
+                .findFirst().orElse(null);
+            if (nearbyNpc != null && agState != null && (ct - agState.lastConversationNudgeTurn) >= 6) {
+                String npcName = String.valueOf(nearbyNpc.get("id"));
+                String npcActivity = nearbyNpc.containsKey("current_activity")
+                    ? " They are currently: " + nearbyNpc.get("current_activity") + "." : "";
+                agState.lastConversationNudgeTurn = ct;
+                pendingIntent = npcName + " is nearby." + npcActivity
+                    + " Consider speaking to them — introduce yourself, ask what they're up to,"
+                    + " share something on your mind, or react to what they're doing."
+                    + " Use commit_action(verb=\"speak\", target_id=\"" + npcName
+                    + "\", target_type=\"agent\", payload=\"<your words>\").";
+            }
+            // (f2) Alone — go find someone
+            else if (nearbyNpc == null) {
+                double social = agent.getSocialDominance();
+                double compassion = agent.getCompassion();
+                if (social > 0.5 || compassion > 0.5) {
+                    pendingIntent = "You haven't seen anyone nearby recently. "
+                        + "Consider seeking out someone to talk to — explore a different area or check on a neighbor.";
+                }
             }
         }
 
@@ -661,6 +770,7 @@ public class SimulationService {
                     combatTarget.getX(), combatTarget.getY());
                 combatTarget.getEpistemicMemory().ingestObserved(combatEvt);
                 triggerAttackedResponse(combatTarget, agent.getFullName(), agent);
+                notifyWitnesses(agent, combatTarget);
                 applyKnockback(agent, combatTarget);
             }
         } else {
@@ -671,25 +781,71 @@ public class SimulationService {
                 agent.getX(), agent.getY(),
                 agent.getX(), agent.getY());
         }
-        // Capture NPC speech directed at the player for client display
+        // Capture NPC speech directed at the player or another agent
         if ("speak".equalsIgnoreCase(result.verb) && result.payload != null && !result.payload.isBlank()) {
             Agent player = findPrimaryPlayer();
-            if (player != null && (player.getFullName().equals(result.targetId)
-                    || "player".equalsIgnoreCase(result.targetType))) {
+            boolean targetIsPlayer = player != null && (player.getFullName().equals(result.targetId)
+                    || "player".equalsIgnoreCase(result.targetType));
+            if (targetIsPlayer) {
+                // Player hears it — show in dialogue log
                 Map<String, Object> speech = new java.util.LinkedHashMap<>();
                 speech.put("speaker", agent.getFullName());
                 speech.put("text", result.payload);
                 pendingNpcSpeeches.add(speech);
+                // Also ingest into player's epistemic memory as hearsay
+                if (player != null) {
+                    player.getEpistemicMemory().ingestHearsay(agent.getFullName(), result.payload, turnCounter.get(), 0.85);
+                }
                 LOG.info("[NpcSpeech] {} speaks to player: {}", agent.getFullName(), result.payload.substring(0, Math.min(60, result.payload.length())));
+            } else {
+                // Agent speaking to another agent
+                Agent targetAgent = world.getAgent(result.targetId).orElse(null);
+                if (targetAgent != null) {
+                    int turn = turnCounter.get();
+                    targetAgent.getEpistemicMemory().ingestHearsay(agent.getFullName(), result.payload, turn, 0.8);
+                    String intent = classifySpeechAndBuildIntent(agent.getFullName(), targetAgent, result.payload, turn);
+                    if (intent != null) {
+                        targetAgent.setPendingDialogueIntent(intent);
+                    }
+                    // Broadcast to client so the speech bubble / action log shows it
+                    Map<String, Object> speech = new java.util.LinkedHashMap<>();
+                    speech.put("speaker", agent.getFullName());
+                    speech.put("text", result.payload);
+                    pendingNpcSpeeches.add(speech);
+                    LOG.info("[NpcSpeech] {} speaks to {}: {}", agent.getFullName(), result.targetId, result.payload.substring(0, Math.min(60, result.payload.length())));
+                }
+                // Overheard speech: bystanders within earshot get lower-confidence hearsay
+                final double EARSHOT_SQ = (6.0 * TILE_SIZE) * (6.0 * TILE_SIZE);
+                final String speakerForOverhear = agent.getFullName();
+                final String contentForOverhear = result.payload;
+                final int overhearTurn = turnCounter.get();
+                for (Agent bystander : world.getAgents()) {
+                    if (bystander.getFullName().equals(speakerForOverhear)) continue;
+                    if (bystander.getFullName().equals(result.targetId)) continue;
+                    double obdx = bystander.getX() - agent.getX(), obdy = bystander.getY() - agent.getY();
+                    if (obdx * obdx + obdy * obdy <= EARSHOT_SQ) {
+                        bystander.getEpistemicMemory().ingestHearsay(speakerForOverhear, contentForOverhear, overhearTurn, 0.55);
+                        LOG.debug("[Overheard] {} overheard {} say to {}: {}", bystander.getFullName(), speakerForOverhear, result.targetId, contentForOverhear.substring(0, Math.min(40, contentForOverhear.length())));
+                    }
+                }
             }
         }
-        // Free-action blurb: broadcast alongside any verb (not just speak)
+        // Free-action blurb: only broadcast if someone is within earshot (prevents self-narration)
         if (result.speech != null && !result.speech.isBlank() && !"speak".equalsIgnoreCase(result.verb)) {
-            Map<String, Object> blurb = new java.util.LinkedHashMap<>();
-            blurb.put("speaker", agent.getFullName());
-            blurb.put("text", result.speech);
-            pendingNpcSpeeches.add(blurb);
-            LOG.info("[NpcBlurb] {} says: {}", agent.getFullName(), result.speech.substring(0, Math.min(60, result.speech.length())));
+            final double EARSHOT_SQ = (6.0 * TILE_SIZE) * (6.0 * TILE_SIZE);
+            boolean hasListener = world.getAgents().stream()
+                .anyMatch(a -> {
+                    if (a.getFullName().equals(agent.getFullName())) return false;
+                    double dx = a.getX() - agent.getX(), dy = a.getY() - agent.getY();
+                    return dx * dx + dy * dy <= EARSHOT_SQ;
+                });
+            if (hasListener) {
+                Map<String, Object> blurb = new java.util.LinkedHashMap<>();
+                blurb.put("speaker", agent.getFullName());
+                blurb.put("text", result.speech);
+                pendingNpcSpeeches.add(blurb);
+                LOG.info("[NpcBlurb] {} says: {}", agent.getFullName(), result.speech.substring(0, Math.min(60, result.speech.length())));
+            }
         }
         // Log all non-movement, non-wait NPC committed actions to the action log.
         // This includes object interactions (carry, use, place_object, open, etc.) and
@@ -924,6 +1080,26 @@ public class SimulationService {
 	}
 
 	Agent agent = new Agent(request.getName(), characteristics, request.getActivity(), location);
+	if (request.getPhysicalDescription() != null && !request.getPhysicalDescription().isBlank()) {
+	    agent.setPhysicalDescription(request.getPhysicalDescription());
+	}
+	if (request.getHomeLocation() != null && !request.getHomeLocation().isBlank()) {
+	    agent.setHomeLocation(request.getHomeLocation());
+	}
+	if (request.getDailySchedule() != null && !request.getDailySchedule().isBlank()) {
+	    agent.setDailySchedule(request.getDailySchedule());
+	}
+	// Always spawn physically in town_square so agents are visible and close together for testing.
+	// homeLocation records where they truly live; their location field starts as town_square.
+	Location spawnLoc = world.getLocation("town_square").orElse(location);
+	if (spawnLoc != location) {
+	    agent.setLocation(spawnLoc);
+	}
+	if (spawnLoc.getMaxX() > spawnLoc.getMinX() && spawnLoc.getMaxY() > spawnLoc.getMinY()) {
+	    double rx = spawnLoc.getMinX() + Math.random() * (spawnLoc.getMaxX() - spawnLoc.getMinX());
+	    double ry = spawnLoc.getMinY() + Math.random() * (spawnLoc.getMaxY() - spawnLoc.getMinY());
+	    agent.setPosition(snapToTile(rx), snapToTile(ry));
+	}
 
 	if (world.create(agent)) {
 	    if (shouldAutoTrackNewAgent()) {
@@ -940,7 +1116,7 @@ public class SimulationService {
 
 	public Map<String, Object> generateAndSpawnAgents(GenerateAgentRequest request) {
 		GenerateAgentRequest safeRequest = request == null ? new GenerateAgentRequest() : request;
-		int count = safeRequest.getCount() == null ? 1 : Math.max(1, Math.min(3, safeRequest.getCount()));
+		int count = safeRequest.getCount() == null ? 1 : Math.max(1, Math.min(10, safeRequest.getCount()));
 		boolean replaceExistingAgents = safeRequest.getReplaceExistingAgents() == null || safeRequest.getReplaceExistingAgents();
 		boolean trackFirstAgent = safeRequest.getTrackFirstAgent() == null || safeRequest.getTrackFirstAgent();
 		boolean enableRepairPass = safeRequest.getEnableRepairPass() == null || safeRequest.getEnableRepairPass();
@@ -983,6 +1159,21 @@ public class SimulationService {
 			CreateAgentRequest createRequest = toCreateAgentRequest(normalized);
 			createAgent(createRequest);
 			existingNames.add(normalized.getName());
+			// Apply aggression-level trait nudges — small one-time deltas at creation
+			String aggLevel = safeRequest.getAggressionLevel();
+			if (aggLevel != null && !aggLevel.isBlank()) {
+				world.getAgent(normalized.getName()).ifPresent(a -> {
+					if ("high".equalsIgnoreCase(aggLevel)) {
+						a.applyTraitDelta("aggression",    0.1);
+						a.applyTraitDelta("riskTolerance", 0.1);
+						a.applyTraitDelta("fearfulness",  -0.1);
+					} else if ("low".equalsIgnoreCase(aggLevel)) {
+						a.applyTraitDelta("compassion",    0.1);
+						a.applyTraitDelta("fearfulness",   0.1);
+						a.applyTraitDelta("aggression",   -0.1);
+					}
+				});
+			}
 
 			Map<String, Object> created = new LinkedHashMap<>();
 			created.put("agent", normalized.toMap());
@@ -1047,7 +1238,17 @@ public class SimulationService {
 
 	String activity = request.getActivity() != null ? request.getActivity() : "idle";
 	Player player = new Player(request.getName(), characteristics, activity, location);
-	
+	String playerDesc = (request.getPhysicalDescription() != null && !request.getPhysicalDescription().isBlank())
+	    ? request.getPhysicalDescription()
+	    : "A young man of average build with dark hair and plain, forgettable clothes. His face is open but gives little away.";
+	player.setPhysicalDescription(playerDesc);
+	// Scatter player within location bounds same as agents
+	if (location.getMaxX() > location.getMinX() && location.getMaxY() > location.getMinY()) {
+	    double rx = location.getMinX() + Math.random() * (location.getMaxX() - location.getMinX());
+	    double ry = location.getMinY() + Math.random() * (location.getMaxY() - location.getMinY());
+	    player.setPosition(snapToTile(rx), snapToTile(ry));
+	}
+
 	world.create(player);
 	inventoryByAgent.putIfAbsent(player.getFullName(), new LinkedHashSet<>());
 	RuntimeAgentState state = runtimeStateByAgent.computeIfAbsent(player.getFullName(), k -> new RuntimeAgentState());
@@ -1680,6 +1881,7 @@ public class SimulationService {
 					targetAgent.getX(), targetAgent.getY());
 				targetAgent.getEpistemicMemory().ingestObserved(atkEvt);
 				triggerAttackedResponse(targetAgent, player.getFullName(), player);
+				notifyWitnesses(player, targetAgent);
 			} else {
 				// Non-attack direct interaction — record it so the agent knows who did what
 				String interactDesc = request.getActionDescription() != null
@@ -1753,6 +1955,117 @@ public class SimulationService {
 			// speaking: minor stress impacts, record as conversation
 			player.setCurrentActivity("Speaking");
 			player.applyStressChange(0.01);
+			// Dev command: /poke
+			// Two forms:
+			//   /poke <AgentZ> <reason>           — Z gets grudge against the player for reason
+			//   /poke <AgentX> <reason> <AgentZ>  — Z gets grudge against X for reason (agent-vs-agent)
+			// Names are matched greedily so multi-word names work without quotes.
+			String rawSpeakText = request.getSpeakText();
+			if (rawSpeakText != null && rawSpeakText.toLowerCase().startsWith("/poke")) {
+			    String afterCmd = rawSpeakText.trim().substring("/poke".length()).trim();
+			    if (!afterCmd.isBlank()) {
+				List<Agent> allNpcs = world.getAgents().stream()
+				    .filter(a -> !(a instanceof Player))
+				    .collect(Collectors.toList());
+				String lowerArgs = afterCmd.toLowerCase();
+
+				// ── Try two-agent form: X <reason> Z ──────────────────────────────
+				Agent agentX = null, agentZ = null;
+				String reasonY = null;
+				outer:
+				for (Agent x : allNpcs) {
+				    String xName = x.getFullName().toLowerCase();
+				    if (!lowerArgs.startsWith(xName)) continue;
+				    String afterX = afterCmd.substring(x.getFullName().length()).trim();
+				    String afterXLower = afterX.toLowerCase();
+				    for (Agent z : allNpcs) {
+					if (z == x) continue;
+					String zName = z.getFullName().toLowerCase();
+					if (afterXLower.endsWith(zName)) {
+					    String y = afterX.substring(0, afterX.length() - z.getFullName().length()).trim();
+					    if (!y.isBlank()) {
+						agentX = x; agentZ = z; reasonY = y;
+						break outer;
+					    }
+					}
+				    }
+				}
+
+				if (agentX != null && agentZ != null) {
+				    // Z learns that X did Y to them
+				    Observation obs = new Observation(agentX.getFullName() + " " + reasonY + ".");
+				    obs.setImportance(9);
+				    agentZ.getMemoryStream().add(obs);
+				    agentZ.getEpistemicMemory().ingestHearsay(agentX.getFullName(), reasonY, turnCounter.get(), 0.95);
+				    agentZ.setPendingDialogueIntent(
+					"** " + agentX.getFullName() + " " + reasonY + ". This just happened. "
+					+ "React as your character demands — confront them, seek revenge, tell someone, or decide to let it go. **");
+				    agentZ.addGrudge(agentX.getFullName(), turnCounter.get() + 30);
+				    LOG.info("[Dev/Poke] {} grudge against {}: {}", agentZ.getFullName(), agentX.getFullName(), reasonY);
+				    res.setResult("Poked " + agentZ.getFullName() + " against " + agentX.getFullName() + ": \"" + reasonY + "\"");
+				    return res;
+				}
+
+				// ── Single-agent form: Z <reason> (player is X) ───────────────────
+				Agent pokeTarget = null;
+				String pokeReason = "disrespected you";
+				for (Agent candidate : allNpcs) {
+				    String candidateName = candidate.getFullName().toLowerCase();
+				    if (lowerArgs.startsWith(candidateName)) {
+					pokeTarget = candidate;
+					String rest = afterCmd.substring(candidate.getFullName().length()).trim();
+					if (!rest.isBlank()) pokeReason = rest;
+					break;
+				    }
+				}
+				if (pokeTarget == null) {
+				    String firstToken = afterCmd.split("\\s+")[0];
+				    String rest = afterCmd.substring(firstToken.length()).trim();
+				    pokeTarget = allNpcs.stream()
+					.filter(a -> a.getFullName().toLowerCase().contains(firstToken.toLowerCase()))
+					.findFirst().orElse(null);
+				    if (pokeTarget != null && !rest.isBlank()) pokeReason = rest;
+				}
+				if (pokeTarget != null) {
+				    String actorName = player.getFullName();
+				    Observation pokeObs = new Observation(actorName + " " + pokeReason + ".");
+				    pokeObs.setImportance(9);
+				    pokeTarget.getMemoryStream().add(pokeObs);
+				    pokeTarget.getEpistemicMemory().ingestHearsay(actorName, pokeReason, turnCounter.get(), 0.95);
+				    pokeTarget.setPendingDialogueIntent(
+					"** " + actorName + " " + pokeReason + ". React immediately and in character. **");
+				    pokeTarget.addGrudge(actorName, turnCounter.get() + 30);
+				    LOG.info("[Dev/Poke] {} grudge against player: {}", pokeTarget.getFullName(), pokeReason);
+				    res.setResult("Poked " + pokeTarget.getFullName() + " — \"" + actorName + " " + pokeReason + "\"");
+				    return res;
+				}
+				res.setResult("Poke failed: no agent matched. Usage:\n  /poke <Name> <reason>  — agent vs player\n  /poke <AgentX> <reason> <AgentZ>  — agent vs agent");
+				return res;
+			    }
+			}
+			// Dev command: /meetup — teleports all NPC agents to town_square for interaction testing
+			if (rawSpeakText != null && rawSpeakText.trim().equalsIgnoreCase("/meetup")) {
+			    Location meetupLoc = world.getLocation("town_square").orElse(null);
+			    if (meetupLoc != null) {
+				int moved = 0;
+				for (Agent npc : world.getAgents()) {
+				    if (npc instanceof Player) continue;
+				    npc.clearActions();
+				    npc.setLocation(meetupLoc);
+				    double rx = meetupLoc.getMinX() + Math.random() * (meetupLoc.getMaxX() - meetupLoc.getMinX());
+				    double ry = meetupLoc.getMinY() + Math.random() * (meetupLoc.getMaxY() - meetupLoc.getMinY());
+				    npc.setPosition(snapToTile(rx), snapToTile(ry));
+				    npc.setCurrentActivity("gathered at the town square");
+				    npc.setPendingDialogueIntent("Everyone has gathered at the town square. Strike up conversation, react to who is nearby, or pursue your goals here.");
+				    moved++;
+				}
+				LOG.info("[Dev/Meetup] Teleported {} NPCs to town_square", moved);
+				res.setResult("Meetup: " + moved + " NPC(s) moved to town_square");
+			    } else {
+				res.setResult("Meetup failed: town_square location not found");
+			    }
+			    return res;
+			}
 			String cleanedSpeak = sanitizeDialogueText(request.getSpeakText());
 			Agent dialogueTarget = null;
 			int closestTileDistance = Integer.MAX_VALUE;
@@ -1797,6 +2110,15 @@ public class SimulationService {
 				Observation heardObs = new Observation(player.getFullName() + " said to me: \"" + cleanedSpeak + "\"");
 				heardObs.setImportance(7);
 				dialogueTarget.getMemoryStream().add(heardObs);
+				// Structured belief: ingest player speech as high-confidence hearsay
+				dialogueTarget.getEpistemicMemory().ingestHearsay(
+					player.getFullName(), cleanedSpeak, turnCounter.get(), 0.9);
+				// Classify for a post-dialogue pending intent (reactive threat/greeting response next turn)
+				String dialogueIntent = classifySpeechAndBuildIntent(
+					player.getFullName(), dialogueTarget, cleanedSpeak, turnCounter.get());
+				if (dialogueIntent != null) {
+					dialogueTarget.setPendingDialogueIntent(dialogueIntent);
+				}
 				res.setTargetAgentState(mapper.fromAgent(dialogueTarget));
 				res.setAgentReplySpeaker(dialogueTarget.getFullName());
 				try {
@@ -2560,9 +2882,22 @@ public class SimulationService {
 		}
 	    }
 
+	    // Timeout stale in-flight flags — clears frozen agents after 45s
+	    {
+		Long inFlightSince = cognitionInFlightSince.get(agent.getFullName());
+		if (inFlightSince != null && System.currentTimeMillis() - inFlightSince > COGNITION_TIMEOUT_MS) {
+		    LOG.warn("[Orchestrator] {} cognition timed out after {}ms — clearing stale flag",
+			agent.getFullName(), System.currentTimeMillis() - inFlightSince);
+		    cognitionInFlight.remove(agent.getFullName());
+		    cognitionInFlightSince.remove(agent.getFullName());
+		}
+	    }
+
 	    boolean cogInFlight = cognitionInFlight.contains(agent.getFullName());
 	    boolean dayStart = request.isForceDayStart() || state.lastRoutineDate == null || !state.lastRoutineDate.equals(nowDate);
 	    if (cogInFlight) {
+		// Survival override fires even when LLM is in-flight — injured agents always act
+		applySurvivalOverrideIfNeeded(agent, agenticState);
 		// LLM job in flight — maintain current activity; result applied next turn
 		LOG.debug("[AsyncCognition] {} in flight, deferring this turn", agent.getFullName());
 		deterministicUpdated.add(agent.getFullName());
@@ -2840,6 +3175,7 @@ public class SimulationService {
 			if (heldFood != null) {
 				LOG.info("[SurvivalOverride] {} eating {} (hp={})", agent.getFullName(), heldFood.getDisplayName(), agent.getHealth());
 				applyTurnResult(agent, TurnResult.committed("use", heldFood.getId(), "object", null, null, new ArrayList<>()));
+				agent.setTargetLocation(null);
 				return;
 			}
 			// Case 2: Pick the closer of nearest consumable food item and nearest machine
@@ -2861,14 +3197,21 @@ public class SimulationService {
 						&& Boolean.TRUE.equals(nearestFood.getProperties().get("usable"))) ? "use" : "carry";
 					LOG.info("[SurvivalOverride] {} {}ing '{}' (hp={}, dist={}t)", agent.getFullName(), verb, nearestFood.getName(), agent.getHealth(), (int)dist);
 					applyTurnResult(agent, TurnResult.committed(verb, nearestFood.getInstanceId(), "object", null, null, new ArrayList<>()));
+					agent.setTargetLocation(null);
 				} else {
 					String foodLoc = nearestFood.getLocation() != null ? nearestFood.getLocation() : "";
 					if (!foodLoc.isBlank()) {
-						world.getLocation(foodLoc).ifPresent(loc -> agent.setTargetLocation(loc.getFullPath()));
+						world.getLocation(foodLoc).ifPresent(loc -> {
+							agent.clearActions();
+							AgentAction moveAction = new AgentAction("move", "seeking food");
+							moveAction.setTargetLocation(loc.getFullPath());
+							agent.enqueueAction(moveAction);
+							agent.setTargetLocation(loc.getFullPath());
+						});
 					}
 					agent.setCurrentActivity("seeking food");
 					LOG.info("[SurvivalOverride] {} navigating to '{}' (hp={}, dist={}t)", agent.getFullName(), nearestFood.getName(), agent.getHealth(), (int)dist);
-					applyTurnResult(agent, TurnResult.committed("wait", "self", "agent", null, null, new ArrayList<>()));
+					agent.getMemoryStream().add(new Observation("I need to find food urgently (health critical)"));
 				}
 				return;
 			}
@@ -3029,6 +3372,73 @@ public class SimulationService {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Deterministic survival override: fires when hp < 50 and no combat goal is active.
+	 * Called both from the outer orchestration (when cognition is in-flight) and from
+	 * runAgenticLoop (when cognition is free). Returns true if this turn was handled.
+	 */
+	private boolean applySurvivalOverrideIfNeeded(Agent agent, AgenticRuntimeState state) {
+		boolean hasCombatGoal = state != null && !state.goalPlan.isEmpty()
+			&& state.goalPlan.peek() != null
+			&& isAggressiveActionType(state.goalPlan.peek().actionType != null
+				? state.goalPlan.peek().actionType : "");
+		if (agent.getHealth() >= 50 || hasCombatGoal) return false;
+
+		// Case 1: Holding consumable food → eat immediately
+		InventoryItem heldFood = agent.getInventory().values().stream()
+			.filter(item -> {
+				WorldObjectInstance obj = objectInstances.get(item.getId());
+				return obj != null && obj.getProperties() != null
+					&& Boolean.TRUE.equals(obj.getProperties().get("consumable"))
+					&& !Boolean.TRUE.equals(obj.getProperties().get("is_trash"));
+			}).findFirst().orElse(null);
+		if (heldFood != null) {
+			LOG.info("[SurvivalOverride] {} eating {} (hp={})", agent.getFullName(), heldFood.getDisplayName(), agent.getHealth());
+			applyTurnResult(agent, TurnResult.committed("use", heldFood.getId(), "object", null, null, new ArrayList<>()));
+			agent.setTargetLocation(null);
+			return true;
+		}
+
+		// Case 2: Pick closer of nearest consumable food item and nearest machine
+		WorldObjectInstance nearestFood = findNearestFoodItem(agent);
+		WorldObjectInstance nearestMachine = findNearestMachine(agent);
+		if (nearestFood == null) {
+			nearestFood = nearestMachine;
+		} else if (nearestMachine != null) {
+			double fdx = nearestFood.getX() - agent.getX(), fdy = nearestFood.getY() - agent.getY();
+			double mdx = nearestMachine.getX() - agent.getX(), mdy = nearestMachine.getY() - agent.getY();
+			if (mdx * mdx + mdy * mdy < fdx * fdx + fdy * fdy) nearestFood = nearestMachine;
+		}
+		if (nearestFood != null) {
+			double dx = nearestFood.getX() - agent.getX();
+			double dy = nearestFood.getY() - agent.getY();
+			double dist = Math.sqrt(dx * dx + dy * dy) / TILE_SIZE;
+			if (dist <= 4.0) {
+				String verb = (nearestFood.getProperties() != null
+					&& Boolean.TRUE.equals(nearestFood.getProperties().get("usable"))) ? "use" : "carry";
+				LOG.info("[SurvivalOverride] {} {}ing '{}' (hp={}, dist={}t)", agent.getFullName(), verb, nearestFood.getName(), agent.getHealth(), (int)dist);
+				applyTurnResult(agent, TurnResult.committed(verb, nearestFood.getInstanceId(), "object", null, null, new ArrayList<>()));
+				agent.setTargetLocation(null);
+			} else {
+				String foodLoc = nearestFood.getLocation() != null ? nearestFood.getLocation() : "";
+				if (!foodLoc.isBlank()) {
+					world.getLocation(foodLoc).ifPresent(loc -> {
+						agent.clearActions();
+						AgentAction moveAction = new AgentAction("move", "seeking food");
+						moveAction.setTargetLocation(loc.getFullPath());
+						agent.enqueueAction(moveAction);
+						agent.setTargetLocation(loc.getFullPath());
+					});
+				}
+				agent.setCurrentActivity("seeking food");
+				LOG.info("[SurvivalOverride] {} navigating to '{}' (hp={}, dist={}t)", agent.getFullName(), nearestFood.getName(), agent.getHealth(), (int)dist);
+				agent.getMemoryStream().add(new Observation("I need to find food urgently (health critical)"));
+			}
+			return true;
+		}
+		return false;
 	}
 
 	private WorldObjectInstance findNearestFoodItem(Agent agent) {
@@ -5186,6 +5596,15 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		request.setActivity(blueprint.getCurrentActivity());
 		request.setLocation(blueprint.getHomeLocation());
 		request.setMemories(blueprint.getMemories());
+		request.setPhysicalDescription(blueprint.getPhysicalDescription());
+		request.setHomeLocation(blueprint.getHomeLocation());
+		Map<String, String> anchors = blueprint.getDailyAnchors();
+		if (anchors != null && !anchors.isEmpty()) {
+			String schedule = anchors.entrySet().stream()
+				.map(e -> e.getKey() + ": " + e.getValue())
+				.collect(Collectors.joining("; "));
+			request.setDailySchedule(schedule);
+		}
 		return request;
 	}
 
@@ -5226,7 +5645,16 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		GeneratedAgentBlueprint blueprint = candidate == null ? new GeneratedAgentBlueprint() : candidate;
 		if (blueprint.getName() == null || blueprint.getName().isBlank()) {
 			warnings.add("Missing name; applied fallback name");
-			blueprint.setName("Generated Agent " + (index + 1));
+			List<String> namePool = List.of(
+				"Edmund Crane", "Vera Holloway", "Silas Morrow", "Nadia Voss",
+				"Cecil Abbot", "Maren Dusk", "Tobias Wells", "Iona Ashby",
+				"Rufus Colm", "Petra Marsh", "Aldous Pike", "Selene Dray",
+				"Cormac Vale", "Lena Frost", "Otto Birch", "Rosalind Hale");
+			String fallback = namePool.stream()
+				.filter(n -> !containsNameIgnoreCase(existingNames, n))
+				.findFirst()
+				.orElse("Wanderer " + (index + 1));
+			blueprint.setName(fallback);
 		}
 		blueprint.setName(makeUniqueAgentName(blueprint.getName(), existingNames));
 
@@ -5253,6 +5681,10 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			anchors.put("noon", "watch people passing through " + location.getFullPath());
 			anchors.put("evening", "reflect quietly before heading home");
 			blueprint.setDailyAnchors(anchors);
+		}
+		if (blueprint.getPhysicalDescription() == null || blueprint.getPhysicalDescription().isBlank()) {
+			warnings.add("Missing physicalDescription; applied generic fallback");
+			blueprint.setPhysicalDescription("An unremarkable figure of average height, dressed plainly, with watchful eyes that give little away.");
 		}
 		return blueprint;
 	}
@@ -5419,13 +5851,14 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			+ extraPrompt
 			+ "Use one homeLocation from this exact list: [" + locationList + "]\n"
 			+ "Do not reuse these names: [" + usedNames + "]\n"
-			+ "Return a JSON object with these keys only: name, homeLocation, currentActivity, coreTraits, flaws, memories, socialStyle, dailyAnchors.\n"
+			+ "Return a JSON object with these keys only: name, homeLocation, currentActivity, coreTraits, flaws, memories, socialStyle, dailyAnchors, physicalDescription.\n"
 			+ "Constraints:\n"
 			+ "- currentActivity: short present-tense phrase\n"
 			+ "- coreTraits: array of 3 to 5 strings\n"
 			+ "- flaws: array of 2 to 4 strings\n"
 			+ "- memories: array of 6 to 10 short first-person factual memories\n"
 			+ "- dailyAnchors: object with morning, noon, evening strings\n"
+			+ "- physicalDescription: 1-2 sentences describing the character's visible appearance in a way that subtly reflects their personality without naming it directly. Be specific and evocative (build, posture, clothing, eyes, distinguishing features). Do NOT say 'they seem X' — show it through appearance.\n"
 			+ "- keep the NPC grounded in the chosen location and suitable for a town simulation\n"
 			+ "- this is NPC number " + (index + 1) + " in the batch\n"
 			+ "JSON only.";
@@ -5442,7 +5875,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			+ "Allowed locations: [" + locationList + "]\n"
 			+ "Disallowed duplicate names: [" + usedNames + "]\n"
 			+ "Validation issues: " + String.join("; ", validationIssues) + "\n"
-			+ "Required keys only: name, homeLocation, currentActivity, coreTraits, flaws, memories, socialStyle, dailyAnchors\n"
+			+ "Required keys only: name, homeLocation, currentActivity, coreTraits, flaws, memories, socialStyle, dailyAnchors, physicalDescription\n"
 			+ "Additional theme request: " + (request.getPrompt() == null ? "none" : request.getPrompt()) + "\n"
 			+ "Original JSON candidate:\n"
 			+ rawGeneration;
@@ -6491,6 +6924,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		String name = agent.getFullName();
 		if (cognitionInFlight.contains(name)) return;
 		cognitionInFlight.add(name);
+		cognitionInFlightSince.put(name, System.currentTimeMillis());
 		cognitionExecutor.submit(() -> {
 			try {
 				cognitionJob.run();
@@ -6500,6 +6934,7 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 				pendingCognitionApplies.offer(onError);
 			} finally {
 				cognitionInFlight.remove(name);
+				cognitionInFlightSince.remove(name);
 			}
 		});
 	}
@@ -6579,6 +7014,13 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 					state.beliefModels.computeIfAbsent(evt.actorId,
 						io.github.nickm980.smallville.entities.AgentBeliefModel::new);
 				model.updateFromObservation(evt.verb, evt.payload);
+				// Witnessed violence — mark as potentially dangerous
+				if (isAggressiveActionType(evt.verb)) {
+					String currentGoal = model.getInferredGoal();
+					if (currentGoal == null || !currentGoal.contains("aggressive")) {
+						model.setInferredGoal("has attacked others — treat with caution");
+					}
+				}
 			}
 
 			// ── Hearsay → look for mentions of known agent names ──────────────
@@ -6639,6 +7081,42 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 			case "attack", "punch", "kick", "tackle", "throw" -> true;
 			default -> false;
 		};
+	}
+
+	/**
+	 * Classifies speech content and returns a pendingDialogueIntent string for the listener's
+	 * next turn briefing, or null if no special intent is warranted (generic info only).
+	 */
+	private String classifySpeechAndBuildIntent(String speakerName, Agent listener, String speech, int turnNumber) {
+		String lower = speech.toLowerCase();
+		boolean isThreat = lower.contains("kill") || lower.contains("hurt") || lower.contains("attack")
+			|| lower.contains("die") || lower.contains("destroy") || lower.contains("regret")
+			|| lower.contains("pay for this") || lower.contains("end you") || lower.contains("stab")
+			|| lower.contains("shoot") || lower.contains("murder") || lower.contains("threaten");
+		if (isThreat) {
+			double fear = listener.getFearfulness();
+			double aggro = listener.getAggression();
+			String disposition = fear > aggro
+				? "You are frightened. You might back away, plead, or flee."
+				: "Your instinct is to stand your ground or retaliate.";
+			return "** " + speakerName + " just threatened you: \"" + speech + "\". "
+				+ disposition + " React as your character demands. **";
+		}
+		boolean isGreeting = lower.startsWith("hi") || lower.startsWith("hey") || lower.startsWith("hello")
+			|| lower.contains("greetings") || lower.contains("good morning") || lower.contains("good evening")
+			|| lower.contains("how are you") || lower.contains("nice to meet");
+		if (isGreeting) {
+			return speakerName + " greeted you: \"" + speech + "\". Respond naturally and in character.";
+		}
+		boolean isQuestion = lower.contains("?") || lower.startsWith("what") || lower.startsWith("where")
+			|| lower.startsWith("who") || lower.startsWith("why") || lower.startsWith("how")
+			|| lower.startsWith("when") || lower.startsWith("do you") || lower.startsWith("can you")
+			|| lower.startsWith("are you") || lower.startsWith("is there") || lower.startsWith("have you");
+		if (isQuestion) {
+			return speakerName + " asked you: \"" + speech + "\". Answer honestly or deflect, as your character would.";
+		}
+		// General information — ingest as hearsay but no forced intent
+		return null;
 	}
 
 	private String buildCombatHitDescription(String actorName, String verb, int damage) {
@@ -6709,6 +7187,50 @@ private static final double STRESS_MEMORY_THRESHOLD = 0.5;
 		}
 		target.getMemoryStream().add(new Observation(
 			"I was attacked by " + attackerName + ". My health is now " + target.getHealth() + "."));
+		// Grudge persists for 60 turns so the agent stays hostile/wary across many interactions
+		target.addGrudge(attackerName, turnCounter.get() + 60);
+	}
+
+	/**
+	 * Notifies nearby bystanders that attacker hit victim.
+	 * Defenders (high compassion + aggression > fearfulness) get a grudge and a pending intent to intervene.
+	 * Cowards (high fearfulness) get a flee nudge.
+	 * Neutral observers get hearsay only.
+	 */
+	private void notifyWitnesses(Agent attacker, Agent victim) {
+		if (attacker == null || victim == null) return;
+		double witnessRadiusSq = (TILE_SIZE * 10) * (TILE_SIZE * 10);
+		int currentTurn = turnCounter.get();
+		for (Agent witness : world.getAgents()) {
+			if (witness == attacker || witness == victim) continue;
+			if (witness instanceof Player) continue;
+			double dx = witness.getX() - victim.getX();
+			double dy = witness.getY() - victim.getY();
+			if (dx * dx + dy * dy > witnessRadiusSq) continue;
+			// Record hearsay regardless of temperament
+			witness.getEpistemicMemory().ingestHearsay(
+				attacker.getFullName(), "attacked " + victim.getFullName(), currentTurn, 0.80);
+			// Don't overwrite a higher-priority intent already queued
+			if (witness.getPendingDialogueIntent() != null) continue;
+			double compassion = witness.getCompassion();
+			double aggression = witness.getAggression();
+			double fear = witness.getFearfulness();
+			if (compassion > 0.55 && aggression > fear) {
+				// Defender: may step in
+				witness.addGrudge(attacker.getFullName(), currentTurn + 40);
+				witness.setPendingDialogueIntent(
+					"** You just witnessed " + attacker.getFullName() + " attack " + victim.getFullName()
+					+ ". Your compassion and nerve demand a reaction — step in, confront the attacker, or protect the victim. **");
+				LOG.info("[Witness] {} (defender) alerted to {}'s attack on {}",
+					witness.getFullName(), attacker.getFullName(), victim.getFullName());
+			} else if (fear > 0.65) {
+				// Coward: flee nudge
+				witness.setPendingDialogueIntent(
+					"** You just witnessed " + attacker.getFullName() + " attack " + victim.getFullName()
+					+ ". This is dangerous — consider getting away from here. **");
+			}
+			// Neutral: hearsay only, no intent
+		}
 	}
 
 	// ── Environment scan ─────────────────────────────────────────────────────
