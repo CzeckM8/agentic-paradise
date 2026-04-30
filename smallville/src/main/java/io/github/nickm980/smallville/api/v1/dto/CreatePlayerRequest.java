@@ -51,4 +51,8 @@ public class CreatePlayerRequest {
 	public void setMemories(String[] memories) {
 		this.memories = memories;
 	}
+
+	private String physicalDescription;
+	public String getPhysicalDescription() { return physicalDescription; }
+	public void setPhysicalDescription(String physicalDescription) { this.physicalDescription = physicalDescription; }
 }

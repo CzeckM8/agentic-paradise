@@ -7,6 +7,7 @@ public class GenerateAgentRequest {
 	private Boolean enableRepairPass;
 	private String preferredLocation;
 	private String prompt;
+	private String aggressionLevel; // "low" | "medium" | "high"
 
 	public Integer getCount() {
 		return count;
@@ -55,4 +56,7 @@ public class GenerateAgentRequest {
 	public void setPrompt(String prompt) {
 		this.prompt = prompt;
 	}
+
+	public String getAggressionLevel() { return aggressionLevel; }
+	public void setAggressionLevel(String aggressionLevel) { this.aggressionLevel = aggressionLevel; }
 }

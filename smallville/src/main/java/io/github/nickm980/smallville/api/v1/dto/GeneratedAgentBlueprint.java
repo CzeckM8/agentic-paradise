@@ -13,6 +13,7 @@ public class GeneratedAgentBlueprint {
 	private List<String> memories;
 	private String socialStyle;
 	private Map<String, String> dailyAnchors;
+	private String physicalDescription;
 
 	public String getName() {
 		return name;
@@ -78,6 +79,9 @@ public class GeneratedAgentBlueprint {
 		this.dailyAnchors = dailyAnchors;
 	}
 
+	public String getPhysicalDescription() { return physicalDescription; }
+	public void setPhysicalDescription(String physicalDescription) { this.physicalDescription = physicalDescription; }
+
 	public Map<String, Object> toMap() {
 		Map<String, Object> result = new LinkedHashMap<>();
 		result.put("name", name);
@@ -88,6 +92,7 @@ public class GeneratedAgentBlueprint {
 		result.put("memories", memories);
 		result.put("socialStyle", socialStyle);
 		result.put("dailyAnchors", dailyAnchors);
+		result.put("physicalDescription", physicalDescription);
 		return result;
 	}
 }
