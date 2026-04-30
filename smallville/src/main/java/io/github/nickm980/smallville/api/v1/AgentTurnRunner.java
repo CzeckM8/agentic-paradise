@@ -213,11 +213,26 @@ public class AgentTurnRunner {
 
         sb.append("You are ").append(agent.getFullName()).append(".\n");
         sb.append("Traits: ").append(agent.getTraits() != null ? agent.getTraits() : "unknown").append("\n");
+        if (agent.getPhysicalDescription() != null && !agent.getPhysicalDescription().isBlank()) {
+            sb.append("Your appearance: ").append(agent.getPhysicalDescription()).append("\n");
+        }
         sb.append("Current time: ").append(
             ctx.simulationTime.format(DateTimeFormatter.ofPattern("EEEE, h:mm a"))).append("\n");
         sb.append("Your location: ").append(
             agent.getLocation() != null ? agent.getLocation().getFullPath() : "unknown").append("\n");
-        sb.append("Current activity: ").append(agent.getCurrentActivity()).append("\n\n");
+        if (agent.getHomeLocation() != null && !agent.getHomeLocation().isBlank()) {
+            sb.append("Your home: ").append(agent.getHomeLocation()).append("\n");
+        }
+        if (agent.getDailySchedule() != null && !agent.getDailySchedule().isBlank()) {
+            sb.append("Your typical day: ").append(agent.getDailySchedule()).append("\n");
+        }
+        sb.append("Current activity: ").append(agent.getCurrentActivity()).append("\n");
+        List<String> activeGrudges = agent.getActiveGrudgeTargets(ctx.turnNumber);
+        if (!activeGrudges.isEmpty()) {
+            sb.append("People you deeply resent: ").append(String.join(", ", activeGrudges)).append("\n");
+            sb.append("You haven't forgotten what they did. Factor this into every decision — seek them out, avoid them, or bide your time based on your character.\n");
+        }
+        sb.append("\n");
 
         // Legal actions (abbreviated — strip " [...]" annotation to save tokens)
         if (ctx.legalActions != null && !ctx.legalActions.isEmpty()) {
@@ -258,6 +273,7 @@ public class AgentTurnRunner {
         sb.append("  - target_type must be 'agent', 'player', or 'object' matching the entity\n");
         sb.append("  - To do nothing this turn: verb=wait, target_id=self, target_type=agent\n");
         sb.append("  - speech (optional, free action): only include if you are genuinely saying words OUT LOUD to a nearby person, e.g. speech=\"Stay back!\" while punching. Do NOT use to describe your own activity — leave it blank if you are just doing something silently.\n");
+        sb.append("Think in multi-turn arcs: build toward longer goals across many turns (going home, finding someone to talk to, completing a task). Call update_plan first to record your intent and start moving, then commit_action to end this turn. Do NOT stay idle if you have a meaningful goal to pursue.\n");
         sb.append("You must call commit_action exactly once — it ends your turn.");
 
         return sb.toString();
