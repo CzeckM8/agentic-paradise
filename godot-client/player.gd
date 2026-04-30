@@ -46,6 +46,8 @@ func _ready():
 	label.position = Vector2(-34, -62)
 	label.add_theme_font_size_override("font_size", 14)
 	label.add_theme_color_override("font_color", Color(0.96, 0.42, 0.20, 1.0))
+	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+	label.add_theme_constant_override("outline_size", 2)
 	label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	label.custom_minimum_size = Vector2(220, 0)
 	_update_label()
@@ -56,6 +58,8 @@ func _ready():
 	speech_label.position = Vector2(-54, -112)
 	speech_label.add_theme_font_size_override("font_size", 10)
 	speech_label.add_theme_color_override("font_color", Color(1.0, 0.82, 0.64, 1.0))
+	speech_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+	speech_label.add_theme_constant_override("outline_size", 2)
 	speech_label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	speech_label.custom_minimum_size = Vector2(140, 0)
 	var bg = StyleBoxFlat.new()

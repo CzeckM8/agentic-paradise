@@ -22,7 +22,7 @@ var _hp_bar_fill: ColorRect = null
 
 const HP_BAR_WIDTH   := 28.0
 const HP_BAR_HEIGHT  := 4.0
-const HP_BAR_OFFSET  := Vector2(-14.0, -46.0)  # above sprite, below name label
+const HP_BAR_Y_PADDING := 8.0
 
 func apply_npc_sprite(sprite_path: String) -> void:
 	var tile_px := 32.0
@@ -37,6 +37,7 @@ func apply_npc_sprite(sprite_path: String) -> void:
 		var d = maxf(float(tex.get_width()), float(tex.get_height()))
 		if d > 0.0:
 			sprite.scale = Vector2(tile_px / d, tile_px / d)
+	_update_overlay_positions()
 
 func _ready():
 	var npc_tex = load("res://assets/sprites/generic_male.png") as Texture2D
@@ -57,6 +58,8 @@ func _ready():
 	sprite.position = Vector2(16, 16)
 	label.position = Vector2(-24, -52)
 	label.add_theme_font_size_override("font_size", 12)
+	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+	label.add_theme_constant_override("outline_size", 2)
 	label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	label.custom_minimum_size = Vector2(180, 0)
 	target_position = position
@@ -67,6 +70,8 @@ func _ready():
 	speech_label.position = Vector2(-44, -106)
 	speech_label.add_theme_font_size_override("font_size", 10)
 	speech_label.add_theme_color_override("font_color", Color.WHITE)
+	speech_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+	speech_label.add_theme_constant_override("outline_size", 2)
 	speech_label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	speech_label.custom_minimum_size = Vector2(120, 0)
 	var bg = StyleBoxFlat.new()
@@ -86,17 +91,16 @@ func _ready():
 	# HP bar — background track + fill bar above sprite
 	_hp_bar_bg = ColorRect.new()
 	_hp_bar_bg.size = Vector2(HP_BAR_WIDTH, HP_BAR_HEIGHT)
-	_hp_bar_bg.position = HP_BAR_OFFSET
 	_hp_bar_bg.color = Color(0.15, 0.15, 0.15, 0.85)
 	_hp_bar_bg.visible = false  # hidden when full health
 	add_child(_hp_bar_bg)
 
 	_hp_bar_fill = ColorRect.new()
 	_hp_bar_fill.size = Vector2(HP_BAR_WIDTH, HP_BAR_HEIGHT)
-	_hp_bar_fill.position = HP_BAR_OFFSET
 	_hp_bar_fill.color = Color(0.20, 0.85, 0.25)
 	_hp_bar_fill.visible = false
 	add_child(_hp_bar_fill)
+	_update_overlay_positions()
 
 func _process(delta):
 	if _speech_timer > 0.0:
@@ -168,6 +172,7 @@ func _update_label():
 	if _hp_bar_fill != null:
 		_hp_bar_fill.visible = show_bar
 		if show_bar:
+			_update_overlay_positions()
 			var pct = clampf(float(health) / 100.0, 0.0, 1.0)
 			_hp_bar_fill.size = Vector2(HP_BAR_WIDTH * pct, HP_BAR_HEIGHT)
 			# Color: green → yellow → red as HP drops
@@ -177,6 +182,23 @@ func _update_label():
 				_hp_bar_fill.color = Color(1.00, 0.75, 0.10)
 			else:
 				_hp_bar_fill.color = Color(0.90, 0.15, 0.10)
+
+func _update_overlay_positions() -> void:
+	if sprite == null:
+		return
+	var sprite_size = Vector2(32.0, 32.0)
+	if sprite.texture != null:
+		sprite_size = Vector2(
+			float(sprite.texture.get_width()) * absf(sprite.scale.x),
+			float(sprite.texture.get_height()) * absf(sprite.scale.y)
+		)
+	var hp_x = sprite.position.x - (HP_BAR_WIDTH * 0.5)
+	var hp_y = sprite.position.y - (sprite_size.y * 0.5) - HP_BAR_Y_PADDING
+	var hp_pos = Vector2(hp_x, hp_y)
+	if _hp_bar_bg != null:
+		_hp_bar_bg.position = hp_pos
+	if _hp_bar_fill != null:
+		_hp_bar_fill.position = hp_pos
 
 func _update_appearance():
 	"""Change color based on activity/state"""

@@ -5098,10 +5098,12 @@ func _redraw_object_overlays():
 			continue
 
 		var label = Label.new()
-		label.text = "%s (%s)" % [object_name, object_type]
+		label.text = _get_concise_object_label(object_name, object_type)
 		label.position = Vector2(tile_center.x + radius + 4.0, tile_center.y - radius - 2.0)
 		label.add_theme_font_size_override("font_size", 10)
-		label.modulate = Color(0.98, 0.98, 0.98, 0.95)
+		label.add_theme_color_override("font_color", Color(0.96, 0.96, 0.96, 0.98))
+		label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+		label.add_theme_constant_override("outline_size", 2)
 		object_overlays.add_child(label)
 
 func _get_object_sprite_path(obj: Dictionary) -> String:
@@ -5159,54 +5161,77 @@ func _get_object_sprite_path(obj: Dictionary) -> String:
 func _make_object_marker(object_type: String, center: Vector2, radius: float, color: Color) -> Node2D:
 	var node = Node2D.new()
 	if object_type == "entrance_anchor":
-		var diamond = Polygon2D.new()
-		diamond.polygon = PackedVector2Array([
+		var diamond_points = PackedVector2Array([
 			center + Vector2(0, -radius),
 			center + Vector2(radius, 0),
 			center + Vector2(0, radius),
 			center + Vector2(-radius, 0)
 		])
+		var diamond = Polygon2D.new()
+		diamond.polygon = diamond_points
 		diamond.color = Color(color.r, color.g, color.b, 0.92)
 		node.add_child(diamond)
+		_add_closed_outline(node, diamond_points, 2.0)
 	elif object_type == "vending_machine":
 		var hw = radius * 0.85
 		var hh = radius * 1.5
-		var body = Polygon2D.new()
-		body.polygon = PackedVector2Array([
+		var body_points = PackedVector2Array([
 			center + Vector2(-hw, -hh), center + Vector2(hw, -hh),
 			center + Vector2(hw, hh),  center + Vector2(-hw, hh)
 		])
+		var body = Polygon2D.new()
+		body.polygon = body_points
 		body.color = Color(0.18, 0.45, 0.95, 0.92)
 		node.add_child(body)
-		var outline = Line2D.new()
-		outline.points = PackedVector2Array([
-			center + Vector2(-hw, -hh), center + Vector2(hw, -hh),
-			center + Vector2(hw, hh),  center + Vector2(-hw, hh),
-			center + Vector2(-hw, -hh)
-		])
-		outline.width = 2.5
-		outline.default_color = Color(0.08, 0.08, 0.12, 1.0)
-		node.add_child(outline)
+		_add_closed_outline(node, body_points, 2.5)
 	elif object_type == "work_spot":
 		var rect = ColorRect.new()
 		rect.position = center - Vector2(radius, radius)
 		rect.size = Vector2(radius * 2.0, radius * 2.0)
 		rect.color = Color(color.r, color.g, color.b, 0.92)
 		node.add_child(rect)
+		var rect_points = PackedVector2Array([
+			rect.position,
+			rect.position + Vector2(rect.size.x, 0),
+			rect.position + rect.size,
+			rect.position + Vector2(0, rect.size.y)
+		])
+		_add_closed_outline(node, rect_points, 2.0)
 	elif object_type == "decor":
-		var tri = Polygon2D.new()
-		tri.polygon = PackedVector2Array([
+		var tri_points = PackedVector2Array([
 			center + Vector2(0, -radius),
 			center + Vector2(radius, radius),
 			center + Vector2(-radius, radius)
 		])
+		var tri = Polygon2D.new()
+		tri.polygon = tri_points
 		tri.color = Color(color.r, color.g, color.b, 0.92)
 		node.add_child(tri)
+		_add_closed_outline(node, tri_points, 2.0)
 	else:
 		var circle = _make_circle_polygon(center, radius, color, 0.92)
 		node.add_child(circle)
+		_add_closed_outline(node, _make_circle_points(center, radius, 24), 2.0)
 
 	return node
+
+func _add_closed_outline(parent: Node2D, points: PackedVector2Array, width: float = 2.0) -> void:
+	if points.size() < 3:
+		return
+	var outline = Line2D.new()
+	outline.points = points
+	outline.closed = true
+	outline.width = width
+	outline.default_color = Color(0.0, 0.0, 0.0, 1.0)
+	parent.add_child(outline)
+
+func _get_concise_object_label(object_name: String, object_type: String) -> String:
+	var cleaned_name = object_name.strip_edges().replace("_", " ")
+	if cleaned_name == "":
+		cleaned_name = object_type.replace("_", " ")
+	if cleaned_name.length() > 18:
+		cleaned_name = cleaned_name.substr(0, 15) + "..."
+	return cleaned_name
 
 func _make_circle_polygon(center: Vector2, radius: float, color: Color, alpha: float) -> Polygon2D:
 	var poly = Polygon2D.new()
