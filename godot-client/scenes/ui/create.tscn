@@ -267,6 +267,34 @@ theme_override_styles/hover = SubResource("StyleBoxFlat_0xa77")
 theme_override_styles/focus = SubResource("StyleBoxFlat_vlguu")
 text = "Stress"
 
+[node name="agent count label" type="Label" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=301010101]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 28
+text = "Number of Agents"
+horizontal_alignment = 1
+
+[node name="HBoxContainer3" type="HBoxContainer" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=302020202]
+layout_mode = 2
+theme_override_constants/separation = 16
+alignment = 1
+
+[node name="agent slider" type="HSlider" parent="CenterContainer/PanelContainer/VBoxContainer/HBoxContainer3" unique_id=303030303]
+custom_minimum_size = Vector2(420, 32)
+layout_mode = 2
+min_value = 1.0
+max_value = 10.0
+step = 1.0
+value = 5.0
+
+[node name="agent count value" type="Label" parent="CenterContainer/PanelContainer/VBoxContainer/HBoxContainer3" unique_id=304040404]
+custom_minimum_size = Vector2(48, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.3, 1.0, 1.0, 1)
+theme_override_font_sizes/font_size = 26
+text = "5"
+horizontal_alignment = 1
+
 [node name="generate button" type="Button" parent="CenterContainer/PanelContainer/VBoxContainer" unique_id=1450403216]
 custom_minimum_size = Vector2(620, 78)
 layout_mode = 2

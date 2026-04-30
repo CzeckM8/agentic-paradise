@@ -8,6 +8,7 @@ var selected_sprite_key: String = "scout"
 var world_name: String = "Paradise Prime"
 var aggression_level: String = "medium"
 var scenario_type: String = "everyday"
+var agent_count: int = 5
 
 # Sprite key -> file path mapping (assets/sprites on this branch)
 var sprite_paths := {

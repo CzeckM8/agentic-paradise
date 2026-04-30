@@ -15,6 +15,8 @@ var _selected_style: StyleBoxFlat
 @onready var stress_btn = $"CenterContainer/PanelContainer/VBoxContainer/HBoxContainer2/Stress button"
 @onready var generate_btn = $"CenterContainer/PanelContainer/VBoxContainer/generate button"
 @onready var back_btn = $"CenterContainer/PanelContainer/VBoxContainer/back button"
+@onready var agent_slider = $"CenterContainer/PanelContainer/VBoxContainer/HBoxContainer3/agent slider"
+@onready var agent_count_label = $"CenterContainer/PanelContainer/VBoxContainer/HBoxContainer3/agent count value"
 
 func _ready():
 	_selected_style = StyleBoxFlat.new()
@@ -37,9 +39,12 @@ func _ready():
 	stress_btn.pressed.connect(_on_scenario.bind("stress", stress_btn))
 	generate_btn.pressed.connect(_on_generate)
 	back_btn.pressed.connect(_on_back)
+	agent_slider.value_changed.connect(_on_agent_count_changed)
 
 	# Pre-fill from GameSession
 	name_input.text = GameSession.world_name
+	agent_slider.value = GameSession.agent_count
+	agent_count_label.text = str(GameSession.agent_count)
 
 	# Set defaults
 	_select_button(medium_btn, _aggression_buttons)
@@ -60,10 +65,15 @@ func _select_button(active: Button, group: Array):
 		else:
 			btn.remove_theme_stylebox_override("normal")
 
+func _on_agent_count_changed(value: float):
+	GameSession.agent_count = int(value)
+	agent_count_label.text = str(int(value))
+
 func _on_generate():
 	GameSession.world_name = name_input.text if name_input.text.strip_edges() != "" else "Paradise Prime"
 	GameSession.aggression_level = aggression_level
 	GameSession.scenario_type = scenario_type
+	GameSession.agent_count = int(agent_slider.value)
 	print("Launching simulation: world=%s, aggression=%s, scenario=%s" % [
 		GameSession.world_name, GameSession.aggression_level, GameSession.scenario_type])
 	get_tree().change_scene_to_file("res://main.tscn")

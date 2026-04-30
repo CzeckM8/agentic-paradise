@@ -24,6 +24,20 @@ const HP_BAR_WIDTH   := 28.0
 const HP_BAR_HEIGHT  := 4.0
 const HP_BAR_OFFSET  := Vector2(-14.0, -46.0)  # above sprite, below name label
 
+func apply_npc_sprite(sprite_path: String) -> void:
+	var tile_px := 32.0
+	var bc := get_node_or_null("../../../BackendConnector")
+	if bc != null and bc.has_method("get_tile_size"):
+		tile_px = float(bc.get_tile_size())
+	var tex = load(sprite_path) as Texture2D
+	if tex:
+		sprite.texture = tex
+		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		sprite.centered = true
+		var d = maxf(float(tex.get_width()), float(tex.get_height()))
+		if d > 0.0:
+			sprite.scale = Vector2(tile_px / d, tile_px / d)
+
 func _ready():
 	var npc_tex = load("res://assets/sprites/generic_male.png") as Texture2D
 	var tile_px := 32.0

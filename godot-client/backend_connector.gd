@@ -10,8 +10,25 @@ var backend_wait_interval = 0.5
 const POLL_INTERVAL_SEC = 5.0  # How often to poll between player turns (NPC autonomous activity)
 var tile_size = 32.0
 var dialogue_interaction_tiles = 5
-var initial_generated_agent_count = 1
+var initial_generated_agent_count = 10
 var initial_object_seed_enabled = true
+
+# NPC sprite pool — cycled in spawn order so agents look distinct
+const NPC_SPRITE_POOL = [
+	"res://assets/sprites/scout_male.png",
+	"res://assets/sprites/bard_female.png",
+	"res://assets/sprites/soldier_male.png",
+	"res://assets/sprites/conjurer_female.png",
+	"res://assets/sprites/devout_male.png",
+	"res://assets/sprites/generic_female.png",
+	"res://assets/sprites/bard_male.png",
+	"res://assets/sprites/scout_female.png",
+	"res://assets/sprites/soldier_female.png",
+	"res://assets/sprites/conjurer_male.png",
+	"res://assets/sprites/devout_female.png",
+	"res://assets/sprites/generic_male.png",
+]
+var _npc_sprite_index: int = 0
 
 # References
 @onready var agents_container = get_node("../World/Agents")
@@ -401,7 +418,7 @@ func _initialize_new_world():
 		await _seed_world_objects()
 
 	print("[INIT] Generating initial agents...")
-	var generated = await _generate_agents_async(initial_generated_agent_count)
+	var generated = await _generate_agents_async(GameSession.agent_count)
 	if generated <= 0:
 		push_warning("[INIT] Agent generation unavailable, creating deterministic fallback agent")
 		await _create_agent_async({
@@ -415,8 +432,8 @@ func _initialize_new_world():
 	print("[INIT] Creating player character...")
 	await _create_player_async({
 		"name": player_name,
-		"location": "home",
-		"activity": "Looking around home",
+		"location": "town_square",
+		"activity": "Looking around the town square.",
 		"memories": ["I've arrived in this strange town.", "I should explore and meet the locals."]
 	})
 
@@ -432,15 +449,21 @@ func _generate_agents_async(count: int) -> int:
 	"""Generate initial NPCs via backend LLM pipeline. Returns created agent count."""
 	var http = HTTPRequest.new()
 	add_child(http)
-	http.timeout = 45.0  # LLM generation can be slow; 45s cap so init doesn't hang
+	http.timeout = 600.0  # 10 agents × ~15-30s each; repair pass disabled to keep this under 5 min
 	var headers = ["Content-Type: application/json"]
+	var aggression_prompt = {
+		"low":    "Characters should be predominantly peaceful, empathetic, and conflict-averse. Flaws may include naivety or passivity rather than aggression.",
+		"medium": "Mix of personalities — some cautious, some bold. Normal town social dynamics.",
+		"high":   "Characters should have a harder edge — suspicious, competitive, or territorial. High tolerance for conflict and quick to react to perceived disrespect."
+	}.get(GameSession.aggression_level, "")
 	var payload = {
-		"count": clamp(count, 1, 3),
+		"count": clamp(count, 1, 10),
 		"replaceExistingAgents": true,
 		"trackFirstAgent": true,
-		"enableRepairPass": true,
+		"enableRepairPass": false,
 		"preferredLocation": "town_square",
-		"prompt": "Create one grounded but psychologically nuanced town resident with subtle contradictions."
+		"aggressionLevel": GameSession.aggression_level,
+		"prompt": "Create grounded but psychologically nuanced town residents with distinct personalities and subtle contradictions. Each should have different traits, goals, and backstories so their interactions feel varied. " + aggression_prompt
 	}
 
 	var err = http.request(
@@ -950,6 +973,7 @@ func _get_default_world_objects() -> Array:
 		{"id":"square_stage","type":"fixture","name":"Public Stage","x":620,"y":760,"location":"town_square","properties":{"performable":true,"passable":false,"height":"low","flat_surface":true,"climbable":true,"description":"A raised wooden platform, scuffed from many performances."}},
 		{"id":"square_fountain","type":"fixture","name":"Fountain","x":780,"y":860,"location":"town_square","properties":{"landmark":true,"passable":false,"height":"medium","description":"A stone fountain, still running. Coins glint at the bottom."}},
 		{"id":"square_notice","type":"decor","name":"Public Notice Wall","x":980,"y":720,"location":"town_square","properties":{"writable":true,"graffiti":true,"passable":true,"height":"tall","has_writing":"Town meeting postponed. Curfew reminder: gates close at dusk."}},
+		{"id":"vending_machine_square","type":"vending_machine","name":"Vending Machine","x":880,"y":640,"location":"town_square","properties":{"usable":true,"produces_item":"chips","produces_heal_amount":25,"passable":false,"height":"tall","carriable":false,"description":"A squat blue vending machine, its display softly lit and humming quietly. It holds bags of chips."}},
 
 		# Home
 		{"id":"home_entry_street","type":"entrance_anchor","name":"Home Entrance","x":224,"y":620,"location":"home","properties":{"linkedHint":"street","building":"home","transition_point":true,"locked":false,"passable":true}},
@@ -3846,6 +3870,10 @@ func _fetch_agents_snapshot_async() -> bool:
 			agent_node.name = agent_name
 			agents_container.add_child(agent_node)
 			agent_nodes[agent_name] = agent_node
+			var sprite_path = NPC_SPRITE_POOL[_npc_sprite_index % NPC_SPRITE_POOL.size()]
+			_npc_sprite_index += 1
+			if agent_node.has_method("apply_npc_sprite"):
+				agent_node.apply_npc_sprite(sprite_path)
 		var base = Vector2(float(agent_data.get("x", 0.0)), float(agent_data.get("y", 0.0)))
 		agent_nodes[agent_name].update_from_backend(agent_data, locations, base)
 
@@ -3957,6 +3985,10 @@ func _update_world(state):
 				agent_node.name = agent_name
 				agents_container.add_child(agent_node)
 				agent_nodes[agent_name] = agent_node
+				var sprite_path = NPC_SPRITE_POOL[_npc_sprite_index % NPC_SPRITE_POOL.size()]
+				_npc_sprite_index += 1
+				if agent_node.has_method("apply_npc_sprite"):
+					agent_node.apply_npc_sprite(sprite_path)
 				print("Spawned agent node: ", agent_name)
 			
 			# figure out position offset grid for this location
@@ -5136,6 +5168,25 @@ func _make_object_marker(object_type: String, center: Vector2, radius: float, co
 		])
 		diamond.color = Color(color.r, color.g, color.b, 0.92)
 		node.add_child(diamond)
+	elif object_type == "vending_machine":
+		var hw = radius * 0.85
+		var hh = radius * 1.5
+		var body = Polygon2D.new()
+		body.polygon = PackedVector2Array([
+			center + Vector2(-hw, -hh), center + Vector2(hw, -hh),
+			center + Vector2(hw, hh),  center + Vector2(-hw, hh)
+		])
+		body.color = Color(0.18, 0.45, 0.95, 0.92)
+		node.add_child(body)
+		var outline = Line2D.new()
+		outline.points = PackedVector2Array([
+			center + Vector2(-hw, -hh), center + Vector2(hw, -hh),
+			center + Vector2(hw, hh),  center + Vector2(-hw, hh),
+			center + Vector2(-hw, -hh)
+		])
+		outline.width = 2.5
+		outline.default_color = Color(0.08, 0.08, 0.12, 1.0)
+		node.add_child(outline)
 	elif object_type == "work_spot":
 		var rect = ColorRect.new()
 		rect.position = center - Vector2(radius, radius)
@@ -5177,6 +5228,8 @@ func _get_object_type_color(object_type: String) -> Color:
 			return Color(1.00, 0.57, 0.12)
 		"work_spot":
 			return Color(1.00, 0.86, 0.18)
+		"vending_machine":
+			return Color(0.18, 0.45, 0.95)
 		"decor":
 			return Color(0.98, 0.37, 0.68)
 		"fixture":
